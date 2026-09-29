@@ -1,0 +1,362 @@
+"""Comprador Inteligente API v5 - nucleo de abastecimiento para construccion."""
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from app.core.config import settings
+from app.core.rate_limit import RateLimitMiddleware
+from app.core.security import require_admin
+from app.database import SessionLocal, init_db
+from app.models import OfferLog, UserFeedback
+from app.schemas import (
+    AlertCreateRequest,
+    BasketOptimizationRequest,
+    BasketOptimizationResponse,
+    FeedbackRequest,
+    SearchResponse,
+)
+from app.services.buyer_service import get_price_history, get_stats, search_products
+from app.services.cache import cache_stats
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if settings.app_env in {"local", "test"}:
+        init_db()
+    try:
+        from app.services.ml_ranker import get_ranker
+
+        logger.info("Ranking iniciado en modo %s.", get_ranker().mode)
+    except Exception as exc:
+        logger.warning("Ranking no disponible: %s", exc)
+    yield
+
+
+app = FastAPI(
+    title="Comprador Inteligente API",
+    version="5.0.0",
+    description="Compara y optimiza compras de materiales de construccion en Chile.",
+    lifespan=lifespan,
+)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.rate_limit_per_minute)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Admin-Key"],
+)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@app.get("/", tags=["Salud"])
+@app.get("/health", tags=["Salud"])
+def healthcheck(db: Session = Depends(get_db)):
+    from app.adapters.playwright_scraper import playwright_available
+    from app.services.ml_ranker import get_ranker
+
+    database_ok = True
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        database_ok = False
+    cache = cache_stats()
+    return {
+        "status": "ok" if database_ok else "degraded",
+        "version": "5.0.0",
+        "database": database_ok,
+        "redis": cache["available"],
+        "cache_keys": cache["keys"],
+        "playwright": playwright_available(),
+        "ranking_mode": get_ranker().mode,
+    }
+
+
+@app.get("/search", response_model=SearchResponse, tags=["Busqueda"])
+def search(
+    q: str = Query(..., min_length=2, max_length=120),
+    country: str = Query("cl", min_length=2, max_length=2),
+    city: str | None = Query(None, max_length=100),
+    max_results: int = Query(20, ge=1, le=50),
+    cache: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    try:
+        return search_products(db, q, country, city, max_results, cache)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Error en /search")
+        raise HTTPException(status_code=500, detail="No fue posible completar la busqueda.") from exc
+
+
+@app.get("/search/stream", tags=["Busqueda"])
+def search_stream(
+    q: str = Query(..., min_length=2, max_length=120),
+    country: str = Query("cl", min_length=2, max_length=2),
+    max_results: int = Query(20, ge=1, le=50),
+):
+    from app.services.product_guardrails import validate_country, validate_query
+    from app.services.streaming import search_stream as stream
+
+    try:
+        query = validate_query(q)
+        market = validate_country(country)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return StreamingResponse(
+        stream(query=query, country=market, max_results=max_results),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/basket/optimize", response_model=BasketOptimizationResponse, tags=["Abastecimiento"])
+def optimize_basket(request: BasketOptimizationRequest, db: Session = Depends(get_db)):
+    from app.services.basket_optimizer import search_and_optimize
+
+    try:
+        return search_and_optimize(
+            request,
+            lambda **kwargs: search_products(db=db, **kwargs),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Error optimizando canasta")
+        raise HTTPException(status_code=500, detail="No fue posible optimizar la canasta.") from exc
+
+
+@app.get("/price-history", tags=["Analisis"])
+def price_history(
+    q: str = Query(..., min_length=2, max_length=120),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    try:
+        rows = get_price_history(db, q, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "query": q,
+        "count": len(rows),
+        "history": [
+            {"date": row.recorded_at, "store": row.store, "price": row.price, "source": row.source, "link": row.link}
+            for row in rows
+        ],
+    }
+
+
+@app.get("/stats", tags=["Analisis"])
+def stats(db: Session = Depends(get_db)):
+    result = get_stats(db)
+    result["cache"] = cache_stats()
+    return result
+
+
+@app.get("/history", tags=["Analisis"])
+def history(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    rows = db.query(OfferLog).order_by(OfferLog.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": row.id,
+            "created_at": row.created_at,
+            "title": row.title,
+            "store": row.store,
+            "price": row.extracted_price,
+            "ml_score": row.ml_score,
+            "anomaly_flag": row.anomaly_flag,
+            "source": row.source,
+            "recommendation": row.recommendation,
+            "link": row.link,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/alerts", tags=["Alertas"])
+def create_alert(request: AlertCreateRequest, db: Session = Depends(get_db)):
+    from app.services.alerts import create_alert as create
+    from app.services.product_guardrails import validate_query
+
+    try:
+        query = validate_query(request.query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    alert = create(
+        db,
+        query=query,
+        target_price=request.target_price,
+        email=str(request.email),
+        store_filter=request.store_filter,
+        note=request.note,
+    )
+    return {"status": "ok", "alert_id": alert.id, "message": "Alerta creada."}
+
+
+@app.get("/alerts", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def list_alerts(email: str | None = Query(None), db: Session = Depends(get_db)):
+    from app.services.alerts import list_alerts as list_all
+
+    return [
+        {
+            "id": alert.id,
+            "query": alert.query,
+            "target_price": alert.target_price,
+            "email": alert.email,
+            "store_filter": alert.store_filter,
+            "created_at": alert.created_at,
+            "note": alert.note,
+        }
+        for alert in list_all(db, email=email)
+    ]
+
+
+@app.delete("/alerts/{alert_id}", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def delete_alert(alert_id: int, db: Session = Depends(get_db)):
+    from app.services.alerts import delete_alert as deactivate
+
+    if not deactivate(db, alert_id):
+        raise HTTPException(status_code=404, detail="Alerta no encontrada.")
+    return {"status": "ok"}
+
+
+@app.post("/alerts/check", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def check_alerts(db: Session = Depends(get_db)):
+    from app.services.alerts import check_alerts as check
+
+    matches = check(db)
+    return {"matched": len(matches), "notified": sum(bool(item["notified"]) for item in matches), "details": matches}
+
+
+@app.post("/alerts/test-email", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def test_email(email: str = Body(..., embed=True)):
+    from app.services.alerts import send_test_email
+
+    success, message = send_test_email(email)
+    if not success:
+        raise HTTPException(status_code=503, detail=message)
+    return {"status": "ok", "message": message}
+
+
+@app.post("/feedback", tags=["Ranking"])
+def feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
+    offer = db.query(OfferLog).filter(OfferLog.id == request.offer_log_id).first()
+    if not offer:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada.")
+    db.add(UserFeedback(offer_log_id=request.offer_log_id, useful=request.useful, comment=request.comment))
+    db.commit()
+    return {"status": "ok", "message": "Feedback registrado."}
+
+
+@app.post("/retrain", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def retrain(db: Session = Depends(get_db)):
+    from app.services.model_training import train_from_database
+
+    try:
+        return {"status": "ok", "model": train_from_database(db)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/ranking/status", tags=["Ranking"])
+def ranking_status():
+    from app.services.ml_ranker import get_ranker
+
+    ranker = get_ranker()
+    return {"status": ranker.status(), "feature_importance": ranker.feature_importance()}
+
+
+@app.get("/feature-importance", tags=["Ranking"])
+def feature_importance():
+    from app.services.ml_ranker import get_ranker
+
+    return {"feature_importance": get_ranker().feature_importance()}
+
+
+@app.post("/search/async", tags=["Busqueda Async"])
+def search_async(
+    q: str = Query(..., min_length=2, max_length=120),
+    country: str = Query("cl", min_length=2, max_length=2),
+    city: str | None = Query(None, max_length=100),
+    max_results: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    try:
+        from app.tasks import search_async_task
+
+        task = search_async_task.apply_async(kwargs={
+            "query": q,
+            "country": country,
+            "city": city,
+            "max_results": max_results,
+        })
+        return {"task_id": task.id, "status": "PENDING"}
+    except Exception as exc:
+        logger.warning("Celery no disponible (%s); usando modo sincrono.", exc)
+        result = search_products(db, q, country, city, max_results, True)
+        return {"task_id": "sync", "status": "SUCCESS", "result": result.model_dump()}
+
+
+@app.get("/search/result/{task_id}", tags=["Busqueda Async"])
+def search_result(task_id: str):
+    if task_id == "sync":
+        return {"state": "SUCCESS", "meta": {"pct": 100}}
+    try:
+        from celery.result import AsyncResult
+        from app.worker import celery_app
+
+        result = AsyncResult(task_id, app=celery_app)
+        if result.state == "SUCCESS":
+            return {"state": "SUCCESS", "meta": {"pct": 100}, "result": result.result}
+        if result.state == "FAILURE":
+            return {"state": "FAILURE", "meta": {"pct": 0}, "error": str(result.result)}
+        return {"state": result.state, "meta": result.info if isinstance(result.info, dict) else {}}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Worker no disponible: {exc}") from exc
+
+
+@app.get("/worker/status", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def worker_status():
+    try:
+        from app.worker import celery_app
+
+        ping = celery_app.control.inspect(timeout=3).ping() or {}
+        return {"workers_online": list(ping)}
+    except Exception as exc:
+        return {"workers_online": [], "error": str(exc)}
+
+
+@app.post("/tasks/warmup", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def warmup_cache(top_n: int = Query(5, ge=1, le=20)):
+    from app.tasks import warmup_cache_task
+
+    task = warmup_cache_task.apply_async(kwargs={"top_n": top_n})
+    return {"task_id": task.id, "status": "PENDING"}
+
+
+@app.post("/tasks/retrain-async", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def retrain_async():
+    from app.tasks import retrain_model_task
+
+    task = retrain_model_task.apply_async()
+    return {"task_id": task.id, "status": "PENDING"}
