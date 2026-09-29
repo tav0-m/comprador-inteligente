@@ -1,18 +1,21 @@
 """Comprador Inteligente API v5 - nucleo de abastecimiento para construccion."""
 from __future__ import annotations
 
+import html
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import settings
-from app.core.rate_limit import RateLimitMiddleware
+from app.core.client_ip import client_fingerprint
+from app.core.rate_limit import RateLimitMiddleware, default_rules
 from app.core.security import require_admin
 from app.database import SessionLocal, init_db
 from app.models import OfferLog, UserFeedback
@@ -48,9 +51,26 @@ app = FastAPI(
     version="5.0.0",
     description="Compara y optimiza compras de materiales de construccion en Chile.",
     lifespan=lifespan,
+    # En produccion no se publica el esquema completo de la API.
+    docs_url=None if settings.app_env == "production" else "/docs",
+    redoc_url=None if settings.app_env == "production" else "/redoc",
+    openapi_url=None if settings.app_env == "production" else "/openapi.json",
 )
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
-app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.rate_limit_per_minute)
+app.add_middleware(RateLimitMiddleware, rules=default_rules(settings))
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+    if settings.app_env == "production":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -195,22 +215,70 @@ def history(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)
 
 @app.post("/alerts", tags=["Alertas"])
 def create_alert(request: AlertCreateRequest, db: Session = Depends(get_db)):
-    from app.services.alerts import create_alert as create
+    from app.services.alerts import AlertLimitExceeded, create_alert as create
     from app.services.product_guardrails import validate_query
 
     try:
         query = validate_query(request.query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    alert = create(
-        db,
-        query=query,
-        target_price=request.target_price,
-        email=str(request.email),
-        store_filter=request.store_filter,
-        note=request.note,
+    try:
+        alert, sent = create(
+            db,
+            query=query,
+            target_price=request.target_price,
+            email=str(request.email),
+            store_filter=request.store_filter,
+            note=request.note,
+        )
+    except AlertLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    if sent:
+        message = "Te enviamos un email para confirmar la alerta; no se activara sin confirmacion."
+    else:
+        message = "Alerta registrada, pero no fue posible enviar el email de confirmacion. Intenta mas tarde."
+    return {"status": "pending_confirmation", "alert_id": alert.id, "message": message}
+
+
+def _alert_page(title: str, message: str, status_code: int = 200) -> HTMLResponse:
+    body = (
+        "<!doctype html><html lang='es'><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{html.escape(title)}</title>"
+        "<body style='font-family:Arial,sans-serif;max-width:560px;margin:48px auto;padding:0 16px'>"
+        f"<h2>{html.escape(title)}</h2><p>{html.escape(message)}</p></body></html>"
     )
-    return {"status": "ok", "alert_id": alert.id, "message": "Alerta creada."}
+    return HTMLResponse(body, status_code=status_code)
+
+
+@app.get("/alerts/confirm", tags=["Alertas"], response_class=HTMLResponse)
+def confirm_alert(
+    id: int = Query(..., gt=0),
+    token: str = Query(..., max_length=200),
+    db: Session = Depends(get_db),
+):
+    from app.services.alerts import confirm_alert as confirm
+
+    alert = confirm(db, id, token)
+    if not alert:
+        return _alert_page("Enlace no valido", "El enlace es invalido, vencio o la alerta fue cancelada.", 400)
+    return _alert_page(
+        "Alerta confirmada",
+        f"Te avisaremos cuando '{alert.query}' baje de CLP {alert.target_price:,.0f}.",
+    )
+
+
+@app.get("/alerts/unsubscribe", tags=["Alertas"], response_class=HTMLResponse)
+def unsubscribe_alert(
+    id: int = Query(..., gt=0),
+    token: str = Query(..., max_length=200),
+    db: Session = Depends(get_db),
+):
+    from app.services.alerts import unsubscribe_alert as unsubscribe
+
+    if not unsubscribe(db, id, token):
+        return _alert_page("Enlace no valido", "No fue posible cancelar la alerta con este enlace.", 400)
+    return _alert_page("Alerta cancelada", "No recibiras mas notificaciones de esta alerta.")
 
 
 @app.get("/alerts", tags=["Administracion"], dependencies=[Depends(require_admin)])
@@ -224,6 +292,7 @@ def list_alerts(email: str | None = Query(None), db: Session = Depends(get_db)):
             "target_price": alert.target_price,
             "email": alert.email,
             "store_filter": alert.store_filter,
+            "confirmed": alert.confirmed,
             "created_at": alert.created_at,
             "note": alert.note,
         }
@@ -259,11 +328,30 @@ def test_email(email: str = Body(..., embed=True)):
 
 
 @app.post("/feedback", tags=["Ranking"])
-def feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
-    offer = db.query(OfferLog).filter(OfferLog.id == request.offer_log_id).first()
+def feedback(request: FeedbackRequest, http_request: Request, db: Session = Depends(get_db)):
+    """Un voto por cliente y oferta (el ultimo reemplaza al anterior), solo sobre ofertas recientes."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.feedback_max_offer_age_days)
+    offer = (
+        db.query(OfferLog)
+        .filter(OfferLog.id == request.offer_log_id, OfferLog.created_at >= cutoff)
+        .first()
+    )
     if not offer:
-        raise HTTPException(status_code=404, detail="Oferta no encontrada.")
-    db.add(UserFeedback(offer_log_id=request.offer_log_id, useful=request.useful, comment=request.comment))
+        raise HTTPException(status_code=404, detail="Oferta no encontrada o demasiado antigua para evaluar.")
+    client_hash = client_fingerprint(http_request)
+    existing = (
+        db.query(UserFeedback)
+        .filter(UserFeedback.offer_log_id == offer.id, UserFeedback.client_hash == client_hash)
+        .first()
+    )
+    if existing:
+        existing.useful = request.useful
+        existing.comment = request.comment
+        existing.created_at = datetime.now(timezone.utc)
+    else:
+        db.add(UserFeedback(
+            offer_log_id=offer.id, client_hash=client_hash, useful=request.useful, comment=request.comment,
+        ))
     db.commit()
     return {"status": "ok", "message": "Feedback registrado."}
 
@@ -329,10 +417,12 @@ def search_result(task_id: str):
         if result.state == "SUCCESS":
             return {"state": "SUCCESS", "meta": {"pct": 100}, "result": result.result}
         if result.state == "FAILURE":
-            return {"state": "FAILURE", "meta": {"pct": 0}, "error": str(result.result)}
+            logger.warning("Tarea %s fallo: %s", task_id, result.result)
+            return {"state": "FAILURE", "meta": {"pct": 0}, "error": "La busqueda no pudo completarse."}
         return {"state": result.state, "meta": result.info if isinstance(result.info, dict) else {}}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Worker no disponible: {exc}") from exc
+        logger.warning("Worker no disponible: %s", exc)
+        raise HTTPException(status_code=503, detail="Worker no disponible.") from exc
 
 
 @app.get("/worker/status", tags=["Administracion"], dependencies=[Depends(require_admin)])

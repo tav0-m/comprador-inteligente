@@ -16,6 +16,15 @@ os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["REDIS_URL"] = ""
 os.environ["ADMIN_API_KEY"] = "test-admin-key"
+os.environ["APP_SECRET_KEY"] = "test-secret-key"
+# Los tests nunca deben enviar emails reales aunque .env tenga credenciales SMTP.
+os.environ["ALERT_EMAIL_FROM"] = ""
+os.environ["ALERT_EMAIL_PASSWORD"] = ""
+os.environ["MERCADOLIBRE_CLIENT_ID"] = ""
+os.environ["MERCADOLIBRE_CLIENT_SECRET"] = ""
+# Limites holgados para la suite; el limitador se prueba aparte con reglas propias.
+os.environ["ALERT_CREATE_LIMIT_PER_HOUR"] = "1000"
+os.environ["RATE_LIMIT_PER_MINUTE"] = "1000"
 os.environ["TRUSTED_HOSTS"] = '["localhost","127.0.0.1","testserver"]'
 os.environ["ENABLE_SERPAPI"] = "false"
 os.environ["ENABLE_MERCADOLIBRE"] = "false"

@@ -69,7 +69,7 @@ export default function AlertsPage() {
         </label>
 
         {mutation.isError && <p className="text-sm text-red-600">{String(mutation.error)}</p>}
-        {mutation.isSuccess && <p className="text-sm text-green-700 font-semibold">Alerta creada correctamente.</p>}
+        {mutation.isSuccess && <p className="text-sm text-green-700 font-semibold">{mutation.data.message}</p>}
         <button className="btn-primary w-full justify-center" disabled={mutation.isPending}>
           {mutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bell className="w-4 h-4" />}
           Crear alerta
@@ -77,8 +77,8 @@ export default function AlertsPage() {
       </form>
 
       <p className="text-xs text-gray-400">
-        La administración y eliminación de alertas está protegida. El autoservicio con verificación de email
-        se incorporará en la fase de cuentas de empresa.
+        La alerta se activa solo después de confirmar el enlace enviado a tu email (vence en 48 horas).
+        Cada aviso incluye un enlace para cancelarla.
       </p>
     </div>
   )

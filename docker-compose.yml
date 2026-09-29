@@ -31,12 +31,16 @@ services:
     restart: unless-stopped
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
-      - "8000:8000"
+      # Solo localhost: el publico entra por el frontend (proxy de confianza para X-Forwarded-For).
+      - "127.0.0.1:8000:8000"
     environment: &app_environment
       APP_ENV: production
       DATABASE_URL: postgresql://ci_user:${POSTGRES_PASSWORD}@db:5432/comprador_inteligente
       REDIS_URL: redis://redis:6379/0
       ADMIN_API_KEY: ${ADMIN_API_KEY:?Define ADMIN_API_KEY en .env}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Define APP_SECRET_KEY en .env}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000/api}
+      TRUSTED_PROXY_CIDRS: '["127.0.0.1/32","::1/128","172.16.0.0/12"]'
       CORS_ORIGINS: '["http://localhost:3000"]'
       TRUSTED_HOSTS: '["localhost","127.0.0.1","api"]'
       SERPAPI_KEY: ${SERPAPI_KEY:-}

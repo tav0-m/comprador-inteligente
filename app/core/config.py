@@ -23,9 +23,20 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = Field(default=900, ge=30, le=86_400)
 
     admin_api_key: str = ""
+    # Firma enlaces de alertas y seudonimiza IPs del feedback. Si falta, se usa ADMIN_API_KEY.
+    app_secret_key: str = ""
+    # URL publica del API para enlaces en emails (via frontend: http://localhost:3000/api).
+    public_api_url: str = "http://localhost:8000"
+    # Proxies cuyo X-Forwarded-For se acepta (p. ej. el contenedor del frontend).
+    trusted_proxy_cidrs: list[str] = ["127.0.0.1/32", "::1/128"]
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     trusted_hosts: list[str] = ["localhost", "127.0.0.1", "testserver", "api"]
     rate_limit_per_minute: int = Field(default=30, ge=1, le=10_000)
+    feedback_limit_per_minute: int = Field(default=20, ge=1, le=1_000)
+    alert_create_limit_per_hour: int = Field(default=5, ge=1, le=1_000)
+    alert_max_active_per_email: int = Field(default=10, ge=1, le=100)
+    alert_max_new_per_email_per_day: int = Field(default=3, ge=1, le=50)
+    feedback_max_offer_age_days: int = Field(default=7, ge=1, le=90)
 
     serpapi_key: str | None = None
     mercadolibre_client_id: str = ""
@@ -52,7 +63,11 @@ class Settings(BaseSettings):
     alert_email_smtp: str = "smtp.gmail.com"
     alert_email_port: int = Field(default=587, ge=1, le=65_535)
 
-    @field_validator("cors_origins", "trusted_hosts", mode="before")
+    @property
+    def signing_secret(self) -> str:
+        return (self.app_secret_key or self.admin_api_key).strip()
+
+    @field_validator("cors_origins", "trusted_hosts", "trusted_proxy_cidrs", mode="before")
     @classmethod
     def parse_csv_or_list(cls, value):
         if isinstance(value, str) and not value.lstrip().startswith("["):

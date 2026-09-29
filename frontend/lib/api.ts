@@ -52,7 +52,7 @@ export const createAlert = (data: {
   email: string
   store_filter?: string
   note?: string
-}) => request<{ status: string; alert_id: number; message: string }>(urlFor('/alerts'), {
+}) => request<{ status: 'pending_confirmation'; alert_id: number; message: string }>(urlFor('/alerts'), {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(data),

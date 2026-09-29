@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import defaultdict
+
 import pandas as pd
 from sqlalchemy.orm import Session
 
@@ -7,6 +9,18 @@ from app.models import OfferLog, SearchLog, UserFeedback
 from app.schemas import ProductOffer
 from app.services.ml_ranker import feature_engineering, get_ranker
 from app.services.specs import annotate_offers
+
+
+def label_from_votes(votes: list[bool]) -> int:
+    """2 = util, 0 = no util, 1 = sin evaluar o empate."""
+    if not votes:
+        return 1
+    useful = sum(votes)
+    if useful * 2 > len(votes):
+        return 2
+    if useful * 2 < len(votes):
+        return 0
+    return 1
 
 
 def build_feedback_training_frame(db: Session) -> pd.DataFrame:
@@ -20,10 +34,12 @@ def build_feedback_training_frame(db: Session) -> pd.DataFrame:
     if not feedback_rows:
         return pd.DataFrame()
 
-    latest_feedback = {}
+    # Voto mayoritario por oferta: con un voto por cliente (client_hash), un solo
+    # cliente no puede invertir la etiqueta de una oferta evaluada por varios.
+    votes: dict[int, list[bool]] = defaultdict(list)
     searches = {}
     for feedback, offer, search in feedback_rows:
-        latest_feedback[offer.id] = feedback
+        votes[offer.id].append(bool(feedback.useful))
         searches[search.id] = search
 
     frames = []
@@ -49,12 +65,7 @@ def build_feedback_training_frame(db: Session) -> pd.DataFrame:
         ]
         frame = feature_engineering(annotate_offers(search.query, pseudo), search.query)
         frame["group_id"] = search_id
-        frame["label"] = [
-            2 if latest_feedback.get(row.id) and latest_feedback[row.id].useful
-            else 0 if latest_feedback.get(row.id) and not latest_feedback[row.id].useful
-            else 1
-            for row in offers
-        ]
+        frame["label"] = [label_from_votes(votes.get(row.id, [])) for row in offers]
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 

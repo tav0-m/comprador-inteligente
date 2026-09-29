@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text
-from sqlalchemy.sql import func
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
+from sqlalchemy.sql import false, func
 from app.database import Base
 
 
@@ -56,8 +56,11 @@ class PriceHistory(Base):
 
 class UserFeedback(Base):
     __tablename__ = "user_feedback"
+    __table_args__ = (UniqueConstraint("offer_log_id", "client_hash", name="uq_feedback_offer_client"),)
     id = Column(Integer, primary_key=True, index=True)
     offer_log_id = Column(Integer, ForeignKey("offer_logs.id"), nullable=True)
+    # HMAC de la IP: un voto por cliente y oferta, sin almacenar la IP.
+    client_hash = Column(String(64), nullable=True)
     useful = Column(Boolean)
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -73,5 +76,8 @@ class PriceAlert(Base):
     active = Column(Boolean, default=True, index=True)
     triggered = Column(Boolean, default=False)
     triggered_at = Column(DateTime(timezone=True), nullable=True)
+    # Doble opt-in: solo se notifican alertas cuyo email confirmo el dueno.
+    confirmed = Column(Boolean, default=False, server_default=false(), nullable=False, index=True)
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     note = Column(Text, nullable=True)
