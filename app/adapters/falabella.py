@@ -1,214 +1,183 @@
 """
-Adaptador Falabella Chile v2 — precio CLP corregido + filtro de valores absurdos.
+Adaptador Falabella Chile v3.
+
+Falabella renderiza la busqueda con Next.js: el HTML trae los productos en
+__NEXT_DATA__ (props.pageProps.results), sin navegador headless. Las antiguas
+APIs /s/browse/v1/listing y /search/api/listing ya no responden JSON, y el
+scraping de tarjetas con Playwright tomaba filtros ("Tipo de Entrega") como
+titulos.
+
+Falabella es marketplace: ~30% de los resultados los vende Sodimac; el
+vendedor real queda en `seller`.
 """
 from __future__ import annotations
-import json, logging, re, time, random
-import requests
-from bs4 import BeautifulSoup
+
+import logging
+import random
+import time
+
+from app.adapters._html_data import dig, fetch_html, format_clp, jsonld_blocks, next_data_page_props, strip_tags
+from app.adapters._price_utils import clp_to_float, to_count, to_rating
 from app.adapters.base import SearchAdapter
-from app.adapters.playwright_scraper import (playwright_available, scrape_with_playwright, parse_falabella_pw)
-from app.adapters._price_utils import clp_to_float, to_int
 from app.schemas import ProductOffer
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/html, */*",
-    "Accept-Language": "es-CL,es;q=0.9",
-    "Referer": "https://www.falabella.com/falabella-cl/",
+SEARCH_URL = "https://www.falabella.com/falabella-cl/search"
+PAGE_SIZE = 48
+MAX_PAGES = 3
+
+# Tipos de precio de la plataforma Falabella/Sodimac.
+# cmrPrice exige tarjeta CMR y normalPrice viene tachado: se informan, no se comparan.
+FALABELLA_PRICE_TYPES = {
+    "current": {"eventPrice", "internetPrice"},
+    "reference": {"normalPrice"},
+    "card": {"cmrPrice"},
 }
 
-_API_ENDPOINTS = [
-    "https://www.falabella.com/s/browse/v1/listing/cl",
-    "https://www.falabella.com/falabella-cl/search/api/listing",
-]
 
 class FalabellaAdapter(SearchAdapter):
     def search(self, query: str, country: str = "cl", max_results: int = 20) -> list[ProductOffer]:
-        if country.lower() != "cl": return []
-        try:
-            return (self._try_api(query, max_results)
-                    or self._try_playwright(query, max_results)
-                    or self._try_html(query, max_results))
-        except Exception as exc:
-            logger.warning(f"[Falabella] Error: {exc}")
+        if country.lower() != "cl":
             return []
-
-    def _try_api(self, query: str, max_results: int) -> list[ProductOffer]:
-        """Pagina la API de Falabella usando el parámetro page (1-based)."""
-        from app.adapters._pagination import MAX_PAGES
-        page_size = 20
-        target    = max(max_results, page_size * MAX_PAGES)
-        collected: list[dict] = []
-
-        for url in _API_ENDPOINTS:
-            collected = []
-            # Falabella usa page=1,2,3 con rows fijo
-            param_key_sets = [
-                {"searchTerm": query, "rows": str(page_size), "sortBy": "CLOSEST_TO_IDEAL"},
-                {"Ntt": query, "Nrpp": str(page_size)},
-                {"q": query, "size": str(page_size)},
-            ]
-            for base_params in param_key_sets:
-                for page_num in range(1, MAX_PAGES + 1):
-                    params = dict(base_params)
-                    # Adaptar el parámetro de página según el formato
-                    if "searchTerm" in params or "q" in params:
-                        params["page"] = str(page_num)
-                    elif "Ntt" in params:
-                        params["No"] = str((page_num - 1) * page_size)
-                    try:
-                        time.sleep(random.uniform(0.2, 0.5))
-                        resp = requests.get(url, params=params, headers=_HEADERS, timeout=15)
-                        if resp.status_code != 200:
-                            break
-                        data = resp.json()
-                        items = (data.get("results") or data.get("data", {}).get("results") or
-                                 data.get("products") or data.get("items") or [])
-                        if not items:
-                            break
-                        collected.extend(items)
-                        logger.debug(f"[Falabella] Página {page_num}: +{len(items)} items")
-                        if len(items) < page_size:
-                            break
-                        if len(collected) >= target:
-                            break
-                    except Exception:
-                        break
-                if collected:
-                    break
-            if collected:
+        offers: list[ProductOffer] = []
+        seen: set[str] = set()
+        for page in range(1, MAX_PAGES + 1):
+            if page > 1:
+                time.sleep(random.uniform(0.2, 0.5))
+            params = {"Ntt": query, **({"page": str(page)} if page > 1 else {})}
+            html = fetch_html(SEARCH_URL, params, store="Falabella")
+            if not html:
                 break
-
-        if not collected:
-            return []
-        offers = [o for o in (_parse_fal_item(r) for r in collected[:target]) if o]
-        if offers:
-            logger.info(f"[Falabella] API paginada: {len(offers)} resultados")
-        return offers
-
-
-    def _try_playwright(self, query: str, max_results: int) -> list[ProductOffer]:
-        if not playwright_available(): return []
-        url = "https://www.falabella.com/falabella-cl/search?Ntt={}".format(requests.utils.quote(query))
-        offers = scrape_with_playwright(
-            url=url, store="Falabella", source="falabella",
-            parser=parse_falabella_pw,
-            wait_selector="[class*='product'], [class*='pod'], article",
-            timeout_ms=25_000,
-        )
+            props = next_data_page_props(html)
+            results = dig(props, "results")
+            if not isinstance(results, list):
+                if page == 1:  # cambio de plataforma: ultimo recurso JSON-LD
+                    offers = parse_jsonld_products(html, store="Falabella", source="falabella")
+                break
+            for item in results:
+                offer = parse_platform_item(item, store="Falabella", source="falabella",
+                                            price_types=FALABELLA_PRICE_TYPES)
+                if offer and offer.link not in seen:
+                    seen.add(offer.link)
+                    offers.append(offer)
+            total = dig(props, "pagination", "count", default=len(results))
+            if len(offers) >= max_results or len(results) < PAGE_SIZE or page * PAGE_SIZE >= total:
+                break
+        logger.info("[Falabella] %d resultados para '%s'", len(offers), query)
         return offers[:max_results]
 
-    def _try_html(self, query: str, max_results: int) -> list[ProductOffer]:
-        time.sleep(random.uniform(0.5, 1.0))
-        try:
-            url = f"https://www.falabella.com/falabella-cl/search?Ntt={requests.utils.quote(query)}"
-            resp = requests.get(url, headers={**_HEADERS, "Accept": "text/html"}, timeout=20)
-            if resp.status_code != 200: return []
-            soup = BeautifulSoup(resp.text, "html.parser")
 
-            offers = _parse_jsonld_fal(soup)
-            if offers:
-                logger.info(f"[Falabella] HTML JSON-LD: {len(offers)} resultados")
-                return offers[:max_results]
-
-            offers = _parse_fal_script(soup)
-            if offers:
-                logger.info(f"[Falabella] HTML script: {len(offers)} resultados")
-                return offers[:max_results]
-
-            offers = _parse_fal_cards(soup)
-            if offers:
-                logger.info(f"[Falabella] HTML cards: {len(offers)} resultados")
-                return offers[:max_results]
-
-        except Exception as exc:
-            logger.debug(f"[Falabella] HTML fallback fallo: {exc}")
-        return []
+def _price_of(entry: dict) -> float | None:
+    if entry.get("priceWithoutFormatting"):
+        return clp_to_float(entry["priceWithoutFormatting"])
+    values = entry.get("price") or []
+    if isinstance(values, (str, int, float)):
+        values = [values]
+    # Rangos ("desde-hasta") traen dos valores: se usa el menor publicado.
+    parsed = [value for value in (clp_to_float(v) for v in values) if value]
+    return min(parsed) if parsed else None
 
 
-def _parse_fal_item(item: dict) -> ProductOffer | None:
-    try:
-        title = (item.get("displayName") or item.get("name") or item.get("title") or "").strip()
-        if not title: return None
-        prices = item.get("prices") or {}
-        price = clp_to_float(prices.get("offerPrice") or prices.get("normalPrice") or
-                              item.get("price") or item.get("offerPrice"))
-        if not price: return None  # sin precio válido, no incluir
-        pid = item.get("productId") or item.get("id") or ""
-        link = item.get("url") or f"https://www.falabella.com/falabella-cl/product/{pid}"
-        media = item.get("mediaUrls") or item.get("images") or []
-        thumb = media[0] if media and isinstance(media[0], str) else None
-        avail = "En stock" if item.get("inStock") or item.get("available") else None
-        shipping = item.get("shipping") or {}
-        delivery = "Envío gratis" if (shipping.get("freeShipping") or item.get("freeShipping")) else "Despacho disponible"
-        return ProductOffer(title=title, store="Falabella", source="falabella",
-                            price_text=f"CLP {price:,.0f}",
-                            extracted_price=price, currency="CLP",
-                            delivery=delivery, availability=avail,
-                            rating=clp_to_float(item.get("rating") or item.get("ratingValue")),
-                            reviews=to_int(item.get("ratingsCount") or item.get("reviewCount")),
-                            link=link, thumbnail=thumb)
-    except Exception:
+def select_prices(prices: list[dict], price_types: dict) -> tuple[float | None, float | None, float | None]:
+    """Retorna (precio_vigente, precio_referencia, precio_tarjeta)."""
+    current, reference, card = [], [], []
+    for entry in prices or []:
+        price = _price_of(entry)
+        if not price:
+            continue
+        kind = entry.get("type")
+        if kind in price_types["card"]:
+            card.append(price)
+        elif (kind in price_types["reference"] or entry.get("crossed")
+              or (entry.get("label") or "").strip().casefold() == "normal"):
+            reference.append(price)
+        else:
+            current.append(price)
+    current_price = min(current) if current else (min(reference) if reference else None)
+    reference_price = max(reference) if reference else None
+    card_price = min(card) if card else None
+    return current_price, reference_price, card_price
+
+
+def parse_platform_item(item: dict, store: str, source: str, price_types: dict,
+                        link_builder=None) -> ProductOffer | None:
+    """Parser comun para la plataforma Next.js de Falabella y Sodimac."""
+    title = (item.get("displayName") or "").strip()
+    if not title:
+        return None
+    price, reference, card = select_prices(item.get("prices") or [], price_types)
+    if not price:
         return None
 
-def _parse_jsonld_fal(soup: BeautifulSoup) -> list[ProductOffer]:
-    offers = []
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-            for item in (data if isinstance(data, list) else [data]):
-                if item.get("@type") == "Product":
-                    title = item.get("name", "")
-                    od = item.get("offers", {})
-                    if isinstance(od, list): od = od[0] if od else {}
-                    price = clp_to_float(od.get("price"))
-                    link = item.get("url") or od.get("url")
-                    img = item.get("image")
-                    thumb = img[0] if isinstance(img, list) else img
-                    if title and price:
-                        offers.append(ProductOffer(title=title, store="Falabella", source="falabella",
-                                                   extracted_price=price,
-                                                   price_text=f"CLP {price:,.0f}",
-                                                   currency="CLP", link=link, thumbnail=thumb,
-                                                   delivery="Despacho disponible"))
-        except Exception:
+    brand = (item.get("brand") or "").strip()
+    if brand and brand.casefold() not in title.casefold():
+        title = f"{brand} {title}"
+
+    price_text = f"CLP {format_clp(price)}"
+    if reference and reference > price:
+        price_text += f" (normal {format_clp(reference)})"
+    if card and card < price:
+        price_text += f" (tarjeta {format_clp(card)})"
+
+    labels = [strip_tags(sticker.get("label")) for sticker in item.get("meatStickers") or []]
+    labels += [strip_tags(event.get("description")) for event in item.get("events") or []]
+    delivery = ", ".join(label for label in labels if label) or "Despacho disponible"
+
+    media = item.get("mediaUrls") or []
+    link = item.get("url") or (link_builder(item) if link_builder else None)
+    return ProductOffer(
+        title=title[:500],
+        store=store,
+        seller=item.get("sellerName") or None,
+        source=source,
+        price_text=price_text[:100],
+        extracted_price=price,
+        currency="CLP",
+        delivery=delivery[:500],
+        availability="Disponible",  # el listado solo muestra productos vendibles
+        rating=to_rating(item.get("rating")),
+        reviews=to_count(item.get("totalReviews")),
+        link=link,
+        thumbnail=media[0] if media and isinstance(media[0], str) else None,
+    )
+
+
+def parse_jsonld_products(html: str, store: str, source: str) -> list[ProductOffer]:
+    """Productos desde JSON-LD: bloques Product sueltos o ItemList de Product."""
+    products = []
+    for block in jsonld_blocks(html):
+        if not isinstance(block, dict):
             continue
-    return offers
+        if block.get("@type") == "Product":
+            products.append(block)
+        entity = block.get("mainEntity") if block.get("@type") != "ItemList" else block
+        for element in dig(entity, "itemListElement", default=[]) or []:
+            item = element.get("item") if isinstance(element, dict) else None
+            if isinstance(item, dict) and item.get("@type", "Product") == "Product":
+                products.append(item)
 
-def _parse_fal_script(soup: BeautifulSoup) -> list[ProductOffer]:
-    for script in soup.find_all("script"):
-        text = script.string or ""
-        if "displayName" not in text and "productId" not in text: continue
-        for pattern in [r'"results"\s*:\s*(\[.{20,}\])', r'"products"\s*:\s*(\[.{20,}\])']:
-            for match in re.findall(pattern, text, re.DOTALL)[:1]:
-                try:
-                    offers = [o for o in (_parse_fal_item(p) for p in json.loads(match)[:20]) if o]
-                    if offers: return offers
-                except Exception:
-                    continue
-    return []
-
-def _parse_fal_cards(soup: BeautifulSoup) -> list[ProductOffer]:
     offers = []
-    for card in soup.find_all(["article","div"], class_=re.compile(r"product|ProductCard|pod"), limit=20):
-        title_el = card.find(["h2","h3","b","span"], class_=re.compile(r"title|name|description"))
-        price_el = card.find(["span","b","div"], class_=re.compile(r"price|precio|offer"))
-        link_el  = card.find("a", href=True)
-        img_el   = card.find("img")
-        if not title_el: continue
-        title    = title_el.get_text(strip=True)
-        price_raw = price_el.get_text(strip=True) if price_el else ""
-        price    = clp_to_float(price_raw)  # usa el parser robusto directamente
-        if not price: continue  # rechazar si precio inválido o fuera de rango
-        link = link_el["href"] if link_el else None
-        if link and not link.startswith("http"): link = "https://www.falabella.com" + link
-        thumb = img_el.get("src") or img_el.get("data-src") if img_el else None
-        if title:
-            offers.append(ProductOffer(title=title, store="Falabella", source="falabella",
-                                       extracted_price=price,
-                                       price_text=f"CLP {price:,.0f}",
-                                       currency="CLP", link=link, thumbnail=thumb,
-                                       delivery="Despacho disponible"))
+    for item in products:
+        offer_data = item.get("offers") or {}
+        if isinstance(offer_data, list):
+            offer_data = offer_data[0] if offer_data else {}
+        price = clp_to_float(offer_data.get("price") or offer_data.get("lowPrice"))
+        title = (item.get("name") or "").strip()
+        if not title or not price:
+            continue
+        brand = dig(item, "brand", "name") or (item.get("brand") if isinstance(item.get("brand"), str) else "")
+        if brand and brand.casefold() not in title.casefold():
+            title = f"{brand} {title}"
+        image = item.get("image")
+        availability = str(offer_data.get("availability") or "")
+        offers.append(ProductOffer(
+            title=title[:500], store=store, source=source,
+            extracted_price=price, price_text=f"CLP {format_clp(price)}",
+            currency=offer_data.get("priceCurrency") or "CLP",
+            link=item.get("url") or offer_data.get("url"),
+            thumbnail=image[0] if isinstance(image, list) and image else image if isinstance(image, str) else None,
+            availability="Sin stock" if "OutOfStock" in availability else "Disponible" if availability else None,
+            delivery="Despacho disponible",
+        ))
     return offers

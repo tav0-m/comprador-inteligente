@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=30, ge=1, le=10_000)
 
     serpapi_key: str | None = None
+    mercadolibre_client_id: str = ""
+    mercadolibre_client_secret: str = ""
     enable_serpapi: bool = False
     enable_mercadolibre: bool = True
     enable_local_csv: bool = True
@@ -35,7 +37,8 @@ class Settings(BaseSettings):
     enable_easy: bool = True
     enable_falabella: bool = True
     enable_paris: bool = True
-    enable_construmart: bool = True
+    # Construmart carga precios por zona via JavaScript: el HTML no trae precios.
+    enable_construmart: bool = False
 
     default_country: str = "cl"
     default_language: str = "es"

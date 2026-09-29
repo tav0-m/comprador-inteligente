@@ -105,3 +105,22 @@ def _valid(number: float) -> float | None:
 def to_int(value) -> int | None:
     parsed = clp_to_float(value)
     return int(parsed) if parsed is not None else None
+
+
+def to_rating(value) -> float | None:
+    """Rating 0-5. No usa clp_to_float: su minimo de 10 CLP descartaba todo rating."""
+    try:
+        number = float(str(value).replace(",", ".")) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    if number is None or not math.isfinite(number) or not 0 <= number <= 5:
+        return None
+    return round(number, 2)
+
+
+def to_count(value) -> int | None:
+    """Conteos (reviews, stock). Acepta '1.234' como miles y valores bajo 10."""
+    if value is None or isinstance(value, bool):
+        return None
+    digits = re.sub(r"[^\d]", "", str(value))
+    return int(digits) if digits else None

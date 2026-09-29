@@ -9,6 +9,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 class ProductOffer(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     store: str | None = Field(default=None, max_length=150)
+    seller: str | None = Field(default=None, max_length=150)  # vendedor real en marketplaces
     source: str = Field(min_length=1, max_length=100)
     price_text: str | None = Field(default=None, max_length=100)
     extracted_price: float | None = Field(default=None, ge=0)
