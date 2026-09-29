@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     alert_max_new_per_email_per_day: int = Field(default=3, ge=1, le=50)
     feedback_max_offer_age_days: int = Field(default=7, ge=1, le=90)
 
+    # Catalogo propio (Fase 4)
+    catalog_freshness_hours: int = Field(default=12, ge=1, le=168)
+    catalog_ingest_interval_hours: int = Field(default=6, ge=1, le=48)
+    catalog_ingest_batch: int = Field(default=40, ge=1, le=500)
+    catalog_ingest_limit_per_source: int = Field(default=48, ge=10, le=150)
+    catalog_max_watch_queries: int = Field(default=500, ge=10, le=10_000)
+
     serpapi_key: str | None = None
     mercadolibre_client_id: str = ""
     mercadolibre_client_secret: str = ""

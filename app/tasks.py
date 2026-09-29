@@ -82,3 +82,16 @@ def warmup_cache_task(top_n: int = 5):
 @celery_app.task(name="app.tasks.monitor_prices_task", soft_time_limit=300)
 def monitor_prices_task(top_n: int = 5):
     return warmup_cache_task.run(top_n=top_n)
+
+
+@celery_app.task(name="app.tasks.ingest_catalog_task", soft_time_limit=1800, time_limit=2000)
+def ingest_catalog_task(limit: int | None = None):
+    """Refresca el catalogo propio con las consultas vigiladas menos recientes."""
+    from app.database import SessionLocal
+    from app.services.catalog import ingest_watchlist
+
+    db = SessionLocal()
+    try:
+        return ingest_watchlist(db, limit=limit)
+    finally:
+        db.close()

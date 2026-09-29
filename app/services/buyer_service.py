@@ -2,21 +2,12 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
-from app.adapters.construmart import ConstrumartAdapter
-from app.adapters.easy import EasyAdapter
-from app.adapters.falabella import FalabellaAdapter
-from app.adapters.local_csv import LocalCSVAdapter
-from app.adapters.mercadolibre import MercadoLibreAdapter
-from app.adapters.paris import ParisAdapter
-from app.adapters.serpapi_google_shopping import SerpApiGoogleShoppingAdapter
-from app.adapters.sodimac import SodimacAdapter
 from app.core.config import settings
 from app.models import OfferLog, PriceHistory, SearchLog
 from app.schemas import ProductOffer, SearchResponse
@@ -26,30 +17,10 @@ from app.services.ml_ranker import rank_with_ml
 from app.services.normalizer import normalize_offer, semantic_deduplicate
 from app.services.product_guardrails import validate_country, validate_query
 from app.services.ranking import rank_offers
+from app.services.sources import fetch_live_offers, get_adapters  # noqa: F401 (reexport)
 from app.services.specs import annotate_offers, dominant_unit, is_comparable
 
 logger = logging.getLogger(__name__)
-
-
-def get_adapters():
-    adapters = []
-    if settings.enable_serpapi and settings.serpapi_key:
-        adapters.append(SerpApiGoogleShoppingAdapter())
-    if settings.enable_mercadolibre:
-        adapters.append(MercadoLibreAdapter())
-    if settings.enable_sodimac:
-        adapters.append(SodimacAdapter())
-    if settings.enable_easy:
-        adapters.append(EasyAdapter())
-    if settings.enable_falabella:
-        adapters.append(FalabellaAdapter())
-    if settings.enable_paris:
-        adapters.append(ParisAdapter())
-    if settings.enable_construmart:
-        adapters.append(ConstrumartAdapter())
-    if settings.enable_local_csv:
-        adapters.append(LocalCSVAdapter())
-    return adapters
 
 
 def search_products(
@@ -70,34 +41,22 @@ def search_products(
         response.elapsed_ms = round((time.perf_counter() - started) * 1000)
         return response
 
-    adapters = get_adapters()
-    raw_offers: list[ProductOffer] = []
-
-    def run_adapter(adapter):
-        try:
-            limit = max(max_results * 2, 36)
-            return adapter.search(query=query, country=country, max_results=limit)
-        except Exception as exc:
-            logger.warning("[%s] fallo: %s", adapter.__class__.__name__, exc)
-            return []
-
-    executor = ThreadPoolExecutor(max_workers=max(1, len(adapters)), thread_name_prefix="store")
-    futures = [executor.submit(run_adapter, adapter) for adapter in adapters]
-    done, pending = wait(futures, timeout=settings.search_timeout_seconds)
-    for future in done:
-        try:
-            raw_offers.extend(future.result())
-        except Exception as exc:
-            logger.warning("[BuyerService] worker fallo: %s", exc)
-    for future in pending:
-        future.cancel()
-    executor.shutdown(wait=False, cancel_futures=True)
-    if pending:
-        logger.warning("[BuyerService] %d fuentes excedieron el timeout global.", len(pending))
+    catalog_hit = _catalog_offers(db, query) if use_cache else None
+    if catalog_hit:
+        raw_offers, data_as_of = catalog_hit
+        data_source, runs = "catalog", []
+    else:
+        limit = max(max_results * 2, 36)
+        raw_offers, runs = fetch_live_offers(query, country, limit)
+        data_source, data_as_of = "live", datetime.now(timezone.utc)
 
     ranked = process_offers(query, raw_offers)
     stats = summarize_offers(ranked)
-    search_id = _save_search(db, query, country, city, ranked, stats["best_price"], stats["avg_price"])
+    search_id = _save_search(
+        db, query, country, city, ranked, stats["best_price"], stats["avg_price"],
+        record_history=data_source == "live",
+    )
+    _update_catalog(db, query, raw_offers, runs, live=data_source == "live")
     response = SearchResponse(
         query=query,
         country=country,
@@ -106,11 +65,42 @@ def search_products(
         offers=ranked[:max_results],
         **stats,
         search_id=search_id,
+        data_source=data_source,
+        data_as_of=data_as_of,
         elapsed_ms=round((time.perf_counter() - started) * 1000),
     )
     if use_cache:
         cache_set(key, response.model_dump())
     return response
+
+
+def _catalog_offers(db: Session, query: str):
+    """Ofertas frescas del catalogo propio; None si no hay o fallo la lectura."""
+    from app.services.catalog import fresh_offers
+
+    try:
+        return fresh_offers(db, query, settings.catalog_freshness_hours)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("[Catalogo] Lectura fallida; se consulta en vivo: %s", exc)
+        return None
+
+
+def _update_catalog(db: Session, query: str, offers: list[ProductOffer], runs: list, live: bool) -> None:
+    """Registra la demanda y, si fue en vivo, guarda las ofertas en el catalogo.
+
+    Nunca interrumpe la busqueda: un fallo del catalogo solo se registra.
+    """
+    from app.services.catalog import ensure_watch, record_offers
+
+    try:
+        if live:
+            record_offers(db, query, offers, runs, trigger="live")
+        ensure_watch(db, query, origin="user", count_request=True)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("[Catalogo] No se pudo actualizar: %s", exc)
 
 
 MIN_COMPARABLE_TO_HIDE_UNRELATED = 3
@@ -161,7 +151,7 @@ def summarize_offers(ranked: list[ProductOffer]) -> dict:
     }
 
 
-def _save_search(db, query, country, city, offers, best_price, average_price) -> int:
+def _save_search(db, query, country, city, offers, best_price, average_price, record_history: bool = True) -> int:
     try:
         search = SearchLog(
             query=query,
@@ -173,7 +163,7 @@ def _save_search(db, query, country, city, offers, best_price, average_price) ->
         )
         db.add(search)
         db.flush()
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        rows = []
         for offer in offers:
             row = OfferLog(
                 search_id=search.id,
@@ -198,33 +188,44 @@ def _save_search(db, query, country, city, offers, best_price, average_price) ->
                 free_shipping=offer.free_shipping,
             )
             db.add(row)
-            db.flush()
+            rows.append((offer, row))
+        db.flush()  # un solo flush para todas las filas (antes: uno por oferta)
+        for offer, row in rows:
             offer.offer_log_id = row.id
-            if offer.extracted_price and offer.extracted_price > 0:
-                duplicate = (
-                    db.query(PriceHistory.id)
-                    .filter(PriceHistory.query == query)
-                    .filter(PriceHistory.store == (offer.store or "Desconocida"))
-                    .filter(PriceHistory.title == offer.title)
-                    .filter(PriceHistory.price == offer.extracted_price)
-                    .filter(PriceHistory.recorded_at >= cutoff)
-                    .first()
-                )
-                if not duplicate:
-                    db.add(PriceHistory(
-                        query=query,
-                        title=offer.title,
-                        store=offer.store or "Desconocida",
-                        source=offer.source,
-                        price=offer.extracted_price,
-                        currency=offer.currency,
-                        link=offer.link,
-                    ))
+        if record_history:
+            record_price_history(db, query, offers)
         db.commit()
         return search.id
     except Exception:
         db.rollback()
         raise
+
+
+def record_price_history(db: Session, query: str, offers: list[ProductOffer]) -> None:
+    """Agrega observaciones a PriceHistory (usado por alertas), sin duplicar en 30 min."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    recent = {
+        (row.store, row.title, row.price)
+        for row in db.query(PriceHistory.store, PriceHistory.title, PriceHistory.price)
+        .filter(PriceHistory.query == query, PriceHistory.recorded_at >= cutoff)
+        .all()
+    }
+    for offer in offers:
+        if not offer.extracted_price or offer.extracted_price <= 0:
+            continue
+        identity = (offer.store or "Desconocida", offer.title, offer.extracted_price)
+        if identity in recent:
+            continue
+        recent.add(identity)
+        db.add(PriceHistory(
+            query=query,
+            title=offer.title,
+            store=identity[0],
+            source=offer.source,
+            price=offer.extracted_price,
+            currency=offer.currency,
+            link=offer.link,
+        ))
 
 
 def get_price_history(db: Session, query: str, limit: int = 200) -> list:

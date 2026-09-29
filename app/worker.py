@@ -29,15 +29,18 @@ celery_app.conf.update(
         "app.tasks.monitor_prices_task": {"queue": "maintenance"},
         "app.tasks.retrain_model_task": {"queue": "ml"},
         "app.tasks.warmup_cache_task": {"queue": "maintenance"},
+        "app.tasks.ingest_catalog_task": {"queue": "maintenance"},
     },
     beat_schedule={
         "check-price-alerts": {
             "task": "app.tasks.check_alerts_task",
             "schedule": 30 * 60,
         },
-        "refresh-popular-prices": {
-            "task": "app.tasks.monitor_prices_task",
-            "schedule": 2 * 60 * 60,
+        # Reemplaza el antiguo refresco de busquedas populares: la ingesta guarda
+        # el catalogo, la serie diaria de precios y alimenta las alertas.
+        "ingest-catalog": {
+            "task": "app.tasks.ingest_catalog_task",
+            "schedule": settings.catalog_ingest_interval_hours * 60 * 60,
         },
     },
 )

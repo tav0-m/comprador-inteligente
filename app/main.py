@@ -444,6 +444,97 @@ def warmup_cache(top_n: int = Query(5, ge=1, le=20)):
     return {"task_id": task.id, "status": "PENDING"}
 
 
+@app.get("/catalog/price-index", tags=["Catalogo"])
+def catalog_price_index(
+    q: str = Query(..., min_length=2, max_length=120),
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    """Serie diaria (min y mediana, por envase y por unidad) de las ofertas comparables."""
+    from app.services.catalog import price_index
+    from app.services.product_guardrails import validate_query
+
+    try:
+        query = validate_query(q)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return price_index(db, query, days)
+
+
+@app.get("/catalog/status", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def catalog_status_endpoint(hours: int = Query(24, ge=1, le=720), db: Session = Depends(get_db)):
+    from app.services.catalog import catalog_status
+
+    return catalog_status(db, hours)
+
+
+@app.get("/catalog/watch", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def list_watch_queries(db: Session = Depends(get_db)):
+    from app.models import WatchQuery
+
+    rows = db.query(WatchQuery).order_by(WatchQuery.requests.desc(), WatchQuery.id.asc()).all()
+    return [
+        {
+            "id": row.id, "query": row.query, "origin": row.origin, "active": row.active,
+            "requests": row.requests, "last_requested_at": row.last_requested_at,
+            "last_ingested_at": row.last_ingested_at,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/catalog/watch", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def add_watch_query(query: str = Body(..., embed=True, min_length=2, max_length=120), db: Session = Depends(get_db)):
+    from app.services.catalog import ensure_watch
+    from app.services.product_guardrails import validate_query
+
+    try:
+        clean = validate_query(query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    watch = ensure_watch(db, clean, origin="admin")
+    db.commit()
+    return {"status": "ok", "id": watch.id, "query": watch.query}
+
+
+@app.delete("/catalog/watch/{watch_id}", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def deactivate_watch_query(watch_id: int, db: Session = Depends(get_db)):
+    from app.models import WatchQuery
+
+    watch = db.get(WatchQuery, watch_id)
+    if not watch:
+        raise HTTPException(status_code=404, detail="Consulta vigilada no encontrada.")
+    watch.active = False
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/tasks/ingest", tags=["Administracion"], dependencies=[Depends(require_admin)])
+def ingest_catalog(
+    query: str | None = Query(None, min_length=2, max_length=120),
+    limit: int | None = Query(None, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Con `query`: ingesta inmediata de una consulta. Sin ella: encola la lista vigilada."""
+    if query:
+        from app.services.catalog import ingest_query
+        from app.services.product_guardrails import validate_query
+
+        try:
+            clean = validate_query(query)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "result": ingest_query(db, clean, trigger="admin")}
+    try:
+        from app.tasks import ingest_catalog_task
+
+        task = ingest_catalog_task.apply_async(kwargs={"limit": limit})
+    except Exception as exc:
+        logger.warning("No se pudo encolar la ingesta: %s", exc)
+        raise HTTPException(status_code=503, detail="Worker no disponible para la ingesta.") from exc
+    return {"task_id": task.id, "status": "PENDING"}
+
+
 @app.post("/tasks/retrain-async", tags=["Administracion"], dependencies=[Depends(require_admin)])
 def retrain_async():
     from app.tasks import retrain_model_task

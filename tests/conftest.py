@@ -38,6 +38,9 @@ os.environ["ENABLE_CONSTRUMART"] = "false"
 
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_database():
+    from app.database import init_db
+
+    init_db()  # esquema disponible tambien para tests que usan la base sin levantar la app
     yield
     from app.database import engine
 

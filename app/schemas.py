@@ -55,6 +55,8 @@ class SearchResponse(BaseModel):
     comparable_count: int = 0  # ofertas que cumplen producto y especificacion buscados
     unit: str | None = None  # unidad comun de las comparables (kg, l, m2, u)
     best_unit_price: float | None = None
+    data_source: Literal["live", "catalog"] | None = None  # tiendas en vivo o catalogo propio
+    data_as_of: datetime | None = None  # cuando se observaron los precios
     search_id: int | None = None
     elapsed_ms: int | None = None
 

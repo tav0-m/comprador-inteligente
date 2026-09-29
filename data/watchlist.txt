@@ -1,0 +1,41 @@
+# Consultas semilla del catalogo: materiales y herramientas de uso frecuente en obra.
+# Una por linea; "#" inicia un comentario. Las busquedas de usuarios se agregan solas.
+cemento 25 kg
+hormigon premezclado saco
+mortero pega
+fierro estriado 8 mm
+fierro estriado 12 mm
+malla acma
+plancha osb 9 mm
+plancha osb 15 mm
+plancha yeso carton 15 mm
+plancha terciado 18 mm
+pino dimensionado 2x4
+perfil metalcon
+tornillo volcanita
+tornillo autoperforante
+clavo corriente 4 pulgadas
+tubo pvc 110 mm
+tubo pvc 40 mm
+membrana asfaltica
+pintura latex 1 galon
+pintura esmalte al agua 1 galon
+anticorrosivo 1 galon
+cinta aislante
+cable electrico 2,5 mm
+ceramica piso
+porcelanato
+adhesivo ceramica 25 kg
+fragüe
+aislapol 50 mm
+lana de vidrio
+teja asfaltica
+zinc acanalado
+taladro percutor
+amoladora angular
+atornillador inalambrico
+sierra circular
+nivel de burbuja
+carretilla
+guantes de seguridad
+casco de seguridad
