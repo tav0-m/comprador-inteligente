@@ -21,9 +21,9 @@ def clp_to_float(value) -> float | None:
     if not text:
         return None
 
-    currency_match = re.search(rf"(?:CLP\s*|\$\s*)({_NUMBER})", text, flags=re.IGNORECASE)
-    if currency_match:
-        return _parse_token(currency_match.group(1))
+    currency_matches = list(re.finditer(rf"(?:CLP\s*|\$\s*)({_NUMBER})", text, flags=re.IGNORECASE))
+    if currency_matches:
+        return _pick_currency_price(text, currency_matches)
 
     tokens = []
     for match in re.finditer(_NUMBER, text):
@@ -34,6 +34,38 @@ def clp_to_float(value) -> float | None:
         if parsed is not None:
             tokens.append(parsed)
     return max(tokens) if tokens else None
+
+
+# Contexto inmediatamente anterior a un monto que indica que NO es el precio del producto.
+_NOT_A_PRICE_CONTEXT = re.compile(
+    r"(cuotas?|ahorr\w*|dcto|descuento|(?:despacho|env[ií]o)(?!\s+gratis))\b[^$\d]{0,25}$",
+    re.IGNORECASE,
+)
+# Contexto de precio de referencia (tachado): solo se usa si no hay otro precio.
+_REFERENCE_CONTEXT = re.compile(r"(antes|normal|referencia)\b[^$\d]{0,12}$", re.IGNORECASE)
+_CONTEXT_WINDOW = 40
+
+
+def _pick_currency_price(text: str, matches: list[re.Match]) -> float | None:
+    """Elige el precio vigente entre varios montos con $/CLP.
+
+    Descarta cuotas, ahorros y costos de despacho; entre los restantes toma el
+    menor (en retail el precio oferta aparece junto al normal tachado).
+    """
+    current, reference = [], []
+    for match in matches:
+        context = text[max(0, match.start() - _CONTEXT_WINDOW):match.start()]
+        if _NOT_A_PRICE_CONTEXT.search(context):
+            continue
+        parsed = _parse_token(match.group(1))
+        if parsed is None:
+            continue
+        (reference if _REFERENCE_CONTEXT.search(context) else current).append(parsed)
+    if current:
+        return min(current)
+    if reference:
+        return min(reference)
+    return None
 
 
 def _parse_token(token: str) -> float | None:

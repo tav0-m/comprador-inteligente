@@ -66,3 +66,15 @@ class TestRanker:
         frame["group_id"] = [1, 1]
         with pytest.raises(ValueError, match="100 ofertas"):
             get_ranker().train_from_feedback(frame)
+
+
+class TestScaleRankerScores:
+    def test_negativos_conservan_orden(self):
+        """LambdaRank produce scores negativos; recortar a [0,100] los empataba en 0."""
+        from app.services.ml_ranker import scale_ranker_scores
+        scaled = scale_ranker_scores([-2.5, -0.3, -1.1])
+        assert scaled.tolist() == pytest.approx([0.0, 100.0, 63.6364], rel=1e-3)
+
+    def test_scores_iguales(self):
+        from app.services.ml_ranker import scale_ranker_scores
+        assert scale_ranker_scores([0.7, 0.7]).tolist() == [50.0, 50.0]

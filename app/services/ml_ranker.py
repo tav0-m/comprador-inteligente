@@ -93,6 +93,21 @@ def heuristic_scores(frame: pd.DataFrame) -> np.ndarray:
     return np.clip(scores, 0, 100)
 
 
+def scale_ranker_scores(raw: np.ndarray) -> np.ndarray:
+    """Lleva scores de LambdaRank (sin escala fija, a menudo negativos) a 0-100.
+
+    Solo el orden relativo dentro de una busqueda tiene significado, por lo que
+    se usa min-max por consulta; recortar a [0, 100] colapsaria los negativos en 0.
+    """
+    values = np.asarray(raw, dtype=float)
+    if values.size == 0:
+        return values
+    low, high = float(values.min()), float(values.max())
+    if not np.isfinite(low) or not np.isfinite(high) or high - low < 1e-12:
+        return np.full(values.shape, 50.0)
+    return (values - low) / (high - low) * 100.0
+
+
 class MLRanker:
     def __init__(self):
         self.model = None
@@ -124,7 +139,7 @@ class MLRanker:
         clean = frame[FEATURE_COLS].fillna(0.0)
         if self.model is None:
             return heuristic_scores(clean)
-        return np.clip(self.model.predict(clean), 0, 100)
+        return scale_ranker_scores(self.model.predict(clean))
 
     def train_from_feedback(self, frame: pd.DataFrame) -> dict:
         required = set(FEATURE_COLS) | {"label", "group_id"}

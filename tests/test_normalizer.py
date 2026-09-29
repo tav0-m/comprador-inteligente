@@ -115,3 +115,19 @@ class TestAnomalyDetection:
         result = detect_price_anomalies(offers)
         ok_flags = [o for o in result if o.anomaly_flag == "ok"]
         assert len(ok_flags) >= 3
+
+    def test_mad_no_fuerza_atipicos(self):
+        """Con precios coherentes no se debe marcar una fraccion fija como anomala."""
+        from app.services.anomaly_detector import detect_price_anomalies
+        offers = [make_offer(title="Cemento", extracted_price=5_000 + i * 50, semantic_group=0) for i in range(12)]
+        result = detect_price_anomalies(offers)
+        assert all(o.anomaly_flag == "ok" for o in result)
+
+    def test_grupo_pequeno_con_precio_extremo(self):
+        """Grupos < 3 ya no quedan 'ok' por defecto si el precio es absurdo vs la busqueda."""
+        from app.services.anomaly_detector import detect_price_anomalies
+        offers = [make_offer(extracted_price=5_000 + i * 100, semantic_group=0) for i in range(5)]
+        offers.append(make_offer(title="Tipo de Entrega", extracted_price=25_000_000, semantic_group=1))
+        result = detect_price_anomalies(offers)
+        assert result[-1].anomaly_flag == "precio_muy_alto"
+        assert all(o.anomaly_flag == "ok" for o in result[:-1])

@@ -111,3 +111,23 @@ class TestCLPEdgeCases:
         result = clp_to_float("1.234,50")
         assert result is not None
         assert result == pytest.approx(1234.5, rel=0.01)
+
+
+class TestCLPContextoRetail:
+    """Textos de tarjetas retail con varios montos: se debe elegir el precio vigente."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("Antes $9.990 Ahora $5.990", 5990.0),
+        ("$5.990 $9.990", 5990.0),
+        ("Precio normal $9.990", 9990.0),
+        ("Ahorra $4.000 Precio $12.990", 12_990.0),
+        ("Envío gratis $5.990", 5990.0),
+        ("Despacho $3.990 $19.990", 19_990.0),
+        ("$89.990 12 cuotas de $7.499", 89_990.0),
+    ])
+    def test_elige_precio_vigente(self, text, expected):
+        assert clp_to_float(text) == expected
+
+    @pytest.mark.parametrize("text", ["12 cuotas de $1.000", "12 cuotas sin interés de $1.000"])
+    def test_cuota_sola_no_es_precio(self, text):
+        assert clp_to_float(text) is None
