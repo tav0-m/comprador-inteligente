@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import OfferLog, SearchLog, UserFeedback
 from app.schemas import ProductOffer
 from app.services.ml_ranker import feature_engineering, get_ranker
+from app.services.specs import annotate_offers
 
 
 def build_feedback_training_frame(db: Session) -> pd.DataFrame:
@@ -46,7 +47,7 @@ def build_feedback_training_frame(db: Session) -> pd.DataFrame:
             )
             for row in offers
         ]
-        frame = feature_engineering(pseudo, search.query)
+        frame = feature_engineering(annotate_offers(search.query, pseudo), search.query)
         frame["group_id"] = search_id
         frame["label"] = [
             2 if latest_feedback.get(row.id) and latest_feedback[row.id].useful

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path("data/models")
 MODEL_PATH = MODEL_DIR / "ranker.joblib"
 METADATA_PATH = MODEL_DIR / "ranker_metadata.json"
-MODEL_SCHEMA_VERSION = 2
+MODEL_SCHEMA_VERSION = 3  # v3: relevancia/especificacion y precio por unidad
 
 TRUSTED_STORES = {
     "sodimac": 0.90,
@@ -31,51 +31,97 @@ TRUSTED_STORES = {
 
 FEATURE_COLS = [
     "price_ratio_to_min", "price_ratio_to_median", "price_log",
-    "title_sim", "store_trust", "has_free_shipping",
+    "title_sim", "relevance", "spec_ok", "store_trust", "has_free_shipping",
     "has_rating", "rating_norm", "log_reviews", "has_stock",
     "source_serpapi", "source_ml", "source_sodimac",
-    "source_easy", "source_falabella", "source_csv",
+    "source_easy", "source_falabella", "source_paris", "source_construmart", "source_csv",
 ]
 
+# Cada feature usada aqui vale entre 0 y 1 y los pesos suman 100: el score
+# heuristico queda en [0, 100] sin recortes que generen empates.
 HEURISTIC_WEIGHTS = {
-    "price_ratio_to_min": 27.0,
-    "price_ratio_to_median": 8.0,
-    "title_sim": 25.0,
-    "store_trust": 12.0,
-    "has_free_shipping": 8.0,
-    "rating_norm": 6.0,
-    "log_reviews": 4.0,
+    "price_ratio_to_min": 25.0,
+    "relevance": 25.0,
+    "spec_ok": 10.0,
+    "store_trust": 10.0,
     "has_stock": 10.0,
+    "title_sim": 5.0,
+    "has_free_shipping": 5.0,
+    "rating_norm": 5.0,
+    "log_reviews": 5.0,
 }
+SPEC_SCORE = {"ok": 1.0, "unknown": 0.5, "mismatch": 0.0, None: 0.5}
+_OUT_OF_STOCK_TERMS = ("sin stock", "agotado", "no disponible", "out of stock")
+_IN_STOCK_TERMS = ("disponible", "stock", "available")
+
+
+def comparable_price(offer) -> float:
+    """Precio por unidad cuando se conoce el contenido; si no, precio del envase."""
+    return float(offer.unit_price or offer.extracted_price or 0)
+
+
+def _price_reference_by_unit(offers: list) -> dict:
+    """Minimo y mediana de precio comparable por unidad (kg, l, u...) o por envase.
+
+    Se calculan sobre ofertas comparables (producto y especificacion correctos);
+    si una unidad no tiene ninguna, se usan todas las de esa unidad.
+    """
+    from app.services.specs import is_comparable
+
+    by_unit: dict[str, list[float]] = {}
+    comparable_by_unit: dict[str, list[float]] = {}
+    for offer in offers:
+        price = comparable_price(offer)
+        if price <= 0:
+            continue
+        key = offer.unit or "_envase"
+        by_unit.setdefault(key, []).append(price)
+        if is_comparable(offer) and offer.anomaly_flag in (None, "ok"):
+            comparable_by_unit.setdefault(key, []).append(price)
+    return {
+        key: (min(values), float(np.median(values)))
+        for key, all_values in by_unit.items()
+        for values in [comparable_by_unit.get(key) or all_values]
+    }
+
+
+def _has_stock(availability: str) -> int:
+    if any(term in availability for term in _OUT_OF_STOCK_TERMS):
+        return 0
+    return int(any(term in availability for term in _IN_STOCK_TERMS))
 
 
 def feature_engineering(offers: list, query: str) -> pd.DataFrame:
-    valid_prices = [offer.extracted_price for offer in offers if offer.extracted_price and offer.extracted_price > 0]
-    min_price = min(valid_prices) if valid_prices else 1.0
-    median_price = float(np.median(valid_prices)) if valid_prices else 1.0
+    references = _price_reference_by_unit(offers)
     rows = []
     for offer in offers:
         price = float(offer.extracted_price or 0)
+        unit_price = comparable_price(offer)
+        min_price, median_price = references.get(offer.unit or "_envase", (0.0, 0.0))
         store_key = (offer.store or "").lower()
         source = (offer.source or "").lower()
         delivery = (offer.delivery or "").lower()
         availability = (offer.availability or "").lower()
         rows.append({
-            "price_ratio_to_min": min_price / price if price > 0 else 0.0,
-            "price_ratio_to_median": median_price / price if price > 0 else 0.0,
+            "price_ratio_to_min": min(min_price / unit_price, 1.0) if unit_price > 0 and min_price else 0.0,
+            "price_ratio_to_median": median_price / unit_price if unit_price > 0 and median_price else 0.0,
             "price_log": math.log1p(price),
             "title_sim": fuzz.token_set_ratio((query or "").lower(), (offer.title or "").lower()) / 100.0,
+            "relevance": 1.0 if offer.relevance is None else float(offer.relevance),
+            "spec_ok": SPEC_SCORE.get(offer.spec_match, 0.5),
             "store_trust": max((value for key, value in TRUSTED_STORES.items() if key in store_key), default=0.60),
             "has_free_shipping": int(any(term in delivery for term in ("gratis", "free", "sin costo"))),
             "has_rating": int(offer.rating is not None),
             "rating_norm": float(offer.rating or 0) / 5.0,
             "log_reviews": math.log1p(offer.reviews or 0),
-            "has_stock": int(any(term in availability for term in ("disponible", "stock", "available", "en stock"))),
+            "has_stock": _has_stock(availability),
             "source_serpapi": int("serpapi" in source),
             "source_ml": int("mercadolibre" in source),
             "source_sodimac": int("sodimac" in source),
             "source_easy": int("easy" in source),
             "source_falabella": int("falabella" in source),
+            "source_paris": int("paris" in source),
+            "source_construmart": int("construmart" in source),
             "source_csv": int("csv" in source),
         })
     return pd.DataFrame(rows, columns=FEATURE_COLS)
@@ -88,9 +134,9 @@ def heuristic_scores(frame: pd.DataFrame) -> np.ndarray:
     for feature, weight in HEURISTIC_WEIGHTS.items():
         values = frame[feature].fillna(0).to_numpy(dtype=float)
         if feature == "log_reviews":
-            values = np.minimum(values / math.log1p(500), 1.0)
-        scores += values * weight
-    return np.clip(scores, 0, 100)
+            values = values / math.log1p(500)
+        scores += np.clip(values, 0.0, 1.0) * weight
+    return scores
 
 
 def scale_ranker_scores(raw: np.ndarray) -> np.ndarray:
@@ -223,27 +269,32 @@ def get_ranker() -> MLRanker:
 
 
 def rank_with_ml(query: str, offers: list) -> list:
+    """Asigna ml_score y ordena: primero las ofertas comparables, luego el resto.
+
+    Percentil y desviacion vs promedio se calculan con precio por unidad, solo
+    entre ofertas comparables de la misma unidad.
+    """
+    from app.services.specs import is_comparable
+
     if not offers:
         return offers
     frame = feature_engineering(offers, query)
     scores = get_ranker().predict(frame)
-    normal_prices = [
-        offer.extracted_price for offer in offers
-        if offer.extracted_price and offer.anomaly_flag in (None, "ok")
-    ]
-    average = float(np.mean(normal_prices)) if normal_prices else None
+    peers: dict[str, list[float]] = {}
+    for offer in offers:
+        if offer.extracted_price and offer.anomaly_flag in (None, "ok") and is_comparable(offer):
+            peers.setdefault(offer.unit or "_envase", []).append(comparable_price(offer))
     for index, offer in enumerate(offers):
         offer.ml_score = round(float(scores[index]), 2)
         if offer.anomaly_flag in ("precio_muy_alto", "precio_muy_bajo"):
             offer.ml_score = max(0.0, offer.ml_score - 25.0)
-        if offer.extracted_price and normal_prices:
-            offer.price_percentile = round(
-                sum(price <= offer.extracted_price for price in normal_prices) / len(normal_prices) * 100,
-                1,
-            )
-        if offer.extracted_price and average:
-            offer.price_vs_avg_pct = round((offer.extracted_price - average) / average * 100, 1)
+        group = peers.get(offer.unit or "_envase") or []
+        price = comparable_price(offer)
+        if price > 0 and group:
+            offer.price_percentile = round(sum(value <= price for value in group) / len(group) * 100, 1)
+            average = float(np.mean(group))
+            offer.price_vs_avg_pct = round((price - average) / average * 100, 1)
         offer.free_shipping = any(
             term in (offer.delivery or "").lower() for term in ("gratis", "free", "sin costo")
         )
-    return sorted(offers, key=lambda item: item.ml_score or 0, reverse=True)
+    return sorted(offers, key=lambda item: (is_comparable(item), item.ml_score or 0), reverse=True)

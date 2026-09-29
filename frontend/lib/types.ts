@@ -19,6 +19,12 @@ export interface ProductOffer {
   price_vs_avg_pct: number | null
   price_percentile: number | null
   offer_log_id: number | null
+  seller?: string | null
+  relevance?: number | null
+  spec_match?: 'ok' | 'unknown' | 'mismatch' | null
+  pack_quantity?: number | null
+  unit?: string | null
+  unit_price?: number | null
 }
 
 export interface SearchResponse {
@@ -31,6 +37,9 @@ export interface SearchResponse {
   avg_price: number | null
   price_spread_pct: number | null
   anomaly_count: number
+  comparable_count?: number
+  unit?: string | null
+  best_unit_price?: number | null
   search_id: number | null
   elapsed_ms: number | null
 }
@@ -70,6 +79,7 @@ export interface BasketSelection {
   quantity: number
   unit: string
   offer: ProductOffer
+  packs?: number | null
   line_total: number
 }
 

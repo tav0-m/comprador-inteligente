@@ -78,3 +78,25 @@ class TestScaleRankerScores:
     def test_scores_iguales(self):
         from app.services.ml_ranker import scale_ranker_scores
         assert scale_ranker_scores([0.7, 0.7]).tolist() == [50.0, 50.0]
+
+
+class TestRelevanceRanking:
+    def test_comparables_antes_que_producto_distinto(self):
+        from app.services.specs import annotate_offers
+        offers = annotate_offers("cemento 25 kg", [
+            make_offer(title="Arena fina 25 kg", extracted_price=970),
+            make_offer(title="Cemento gris 1 kg", extracted_price=890),
+            make_offer(title="Cemento especial 25 kg", extracted_price=5090),
+        ])
+        ranked = rank_with_ml("cemento 25 kg", offers)
+        assert ranked[0].title == "Cemento especial 25 kg"
+
+    def test_sin_stock_no_cuenta_como_stock(self):
+        frame = feature_engineering([make_offer(availability="Sin stock")], "taladro")
+        assert frame["has_stock"].iloc[0] == 0
+
+    def test_heuristica_acotada_sin_saturar(self):
+        frame = feature_engineering([make_offer(), make_offer(extracted_price=60000)], "taladro")
+        from app.services.ml_ranker import heuristic_scores
+        scores = heuristic_scores(frame)
+        assert (scores <= 100).all() and scores[0] > scores[1]

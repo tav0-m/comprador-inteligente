@@ -13,6 +13,14 @@ function formatCLP(value: number | null): string {
   }).format(value)
 }
 
+function formatUnitPrice(offer: ProductOffer): string | null {
+  if (!offer.unit_price || !offer.unit) return null
+  const value = new Intl.NumberFormat('es-CL', {
+    style: 'currency', currency: 'CLP', maximumFractionDigits: offer.unit_price < 100 ? 1 : 0,
+  }).format(offer.unit_price)
+  return `${value} / ${offer.unit === 'u' ? 'unidad' : offer.unit}`
+}
+
 const STORE_COLORS: Record<string, string> = {
   Sodimac: 'bg-orange-100 text-orange-700',
   Easy: 'bg-green-100 text-green-700',
@@ -34,6 +42,9 @@ export default function ProductCard({ offer, isBest, rank }: Props) {
   const anomalyLow = offer.anomaly_flag === 'precio_muy_bajo'
   const store = offer.store ?? 'Tienda no identificada'
   const storeColor = STORE_COLORS[store] ?? 'bg-gray-100 text-gray-700'
+  const unitPrice = formatUnitPrice(offer)
+  const specMismatch = offer.spec_match === 'mismatch'
+  const showSeller = offer.seller && offer.seller.toLowerCase() !== store.toLowerCase()
 
   async function rate(useful: boolean) {
     if (!offer.offer_log_id) return
@@ -59,12 +70,14 @@ export default function ProductCard({ offer, isBest, rank }: Props) {
       <div>
         <span className={clsx('badge text-xs mb-1.5', storeColor)}>{store}</span>
         <p className="font-semibold text-sm leading-tight text-gray-800 line-clamp-2">{offer.title}</p>
+        {showSeller && <p className="text-xs text-gray-400 mt-0.5">Vendido por {offer.seller}</p>}
       </div>
 
       <div>
         <p className={clsx('text-2xl font-black', isBest ? 'text-success-600' : 'text-brand-600')}>
           {formatCLP(offer.extracted_price)}
         </p>
+        {unitPrice && <p className="text-xs font-semibold text-gray-500">{unitPrice}</p>}
         {offer.price_vs_avg_pct !== null && (
           <p className={clsx('text-xs font-semibold flex items-center gap-0.5 mt-0.5', offer.price_vs_avg_pct < 0 ? 'text-green-600' : 'text-red-500')}>
             {offer.price_vs_avg_pct < 0 ? <TrendingDown className="w-3 h-3" /> : <TrendingUp className="w-3 h-3" />}
@@ -77,6 +90,9 @@ export default function ProductCard({ offer, isBest, rank }: Props) {
         {offer.free_shipping && <span className="badge badge-purple"><Truck className="w-3 h-3" /> Envío gratis</span>}
         {offer.rating !== null && (
           <span className="badge badge-blue"><Star className="w-3 h-3" /> {offer.rating.toFixed(1)}{offer.reviews !== null && ` (${offer.reviews})`}</span>
+        )}
+        {specMismatch && (
+          <span className="badge badge-orange"><AlertTriangle className="w-3 h-3" /> Medida distinta</span>
         )}
         {(anomalyHigh || anomalyLow) && (
           <span className="badge badge-orange"><AlertTriangle className="w-3 h-3" /> Confirmar precio atípico</span>

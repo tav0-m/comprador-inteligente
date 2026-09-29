@@ -26,6 +26,7 @@ from app.services.ml_ranker import rank_with_ml
 from app.services.normalizer import normalize_offer, semantic_deduplicate
 from app.services.product_guardrails import validate_country, validate_query
 from app.services.ranking import rank_offers
+from app.services.specs import annotate_offers, dominant_unit, is_comparable
 
 logger = logging.getLogger(__name__)
 
@@ -94,45 +95,70 @@ def search_products(
     if pending:
         logger.warning("[BuyerService] %d fuentes excedieron el timeout global.", len(pending))
 
-    normalized = [normalize_offer(offer) for offer in raw_offers if offer and offer.title]
-    grouped = semantic_deduplicate(normalized)
-    analyzed = detect_price_anomalies(grouped)
-    ranked = rank_with_ml(query, rank_offers(query, analyzed))
-
-    normal_prices = [
-        offer.extracted_price for offer in ranked
-        if offer.extracted_price and 10 <= offer.extracted_price <= 30_000_000 and offer.anomaly_flag == "ok"
-    ]
-    best_price = min(normal_prices) if normal_prices else None
-    if normal_prices:
-        sorted_prices = sorted(normal_prices)
-        trim = len(sorted_prices) // 10
-        sample = sorted_prices[trim:-trim] if trim and len(sorted_prices) > 2 * trim else sorted_prices
-        average_price = float(np.mean(sample))
-    else:
-        average_price = None
-    spread = (
-        round((max(normal_prices) - min(normal_prices)) / min(normal_prices) * 100, 1)
-        if len(normal_prices) >= 2 else None
-    )
-    summary = anomaly_summary(ranked)
-    search_id = _save_search(db, query, country, city, ranked, best_price, average_price)
+    ranked = process_offers(query, raw_offers)
+    stats = summarize_offers(ranked)
+    search_id = _save_search(db, query, country, city, ranked, stats["best_price"], stats["avg_price"])
     response = SearchResponse(
         query=query,
         country=country,
         city=city,
         total_results=min(len(ranked), max_results),
         offers=ranked[:max_results],
-        best_price=best_price,
-        avg_price=round(average_price, 0) if average_price else None,
-        price_spread_pct=spread,
-        anomaly_count=summary["precio_muy_alto"] + summary["precio_muy_bajo"],
+        **stats,
         search_id=search_id,
         elapsed_ms=round((time.perf_counter() - started) * 1000),
     )
     if use_cache:
         cache_set(key, response.model_dump())
     return response
+
+
+MIN_COMPARABLE_TO_HIDE_UNRELATED = 3
+UNRELATED_RELEVANCE = 0.5
+
+
+def process_offers(query: str, raw_offers: list[ProductOffer]) -> list[ProductOffer]:
+    """Normaliza, anota especificaciones, agrupa, detecta anomalias y rankea.
+
+    Si hay suficientes ofertas comparables se ocultan las de otro producto
+    (p. ej. arena al buscar cemento); las de otra medida quedan al final.
+    """
+    normalized = [normalize_offer(offer) for offer in raw_offers if offer and offer.title]
+    annotated = annotate_offers(query, normalized)
+    grouped = semantic_deduplicate(annotated)
+    analyzed = detect_price_anomalies(grouped)
+    ranked = rank_with_ml(query, rank_offers(query, analyzed))
+    if sum(is_comparable(offer) for offer in ranked) >= MIN_COMPARABLE_TO_HIDE_UNRELATED:
+        ranked = [offer for offer in ranked if (offer.relevance or 0) >= UNRELATED_RELEVANCE]
+    return ranked
+
+
+def summarize_offers(ranked: list[ProductOffer]) -> dict:
+    """KPIs de la busqueda calculados solo sobre ofertas comparables y sin anomalia."""
+    reliable = [
+        offer for offer in ranked
+        if offer.extracted_price and 10 <= offer.extracted_price <= 30_000_000
+        and offer.anomaly_flag == "ok" and is_comparable(offer)
+    ]
+    prices = sorted(offer.extracted_price for offer in reliable)
+    if prices:
+        trim = len(prices) // 10
+        sample = prices[trim:-trim] if trim and len(prices) > 2 * trim else prices
+        average_price = round(float(np.mean(sample)), 0)
+    else:
+        average_price = None
+    unit = dominant_unit(reliable)
+    unit_prices = [offer.unit_price for offer in reliable if unit and offer.unit == unit and offer.unit_price]
+    summary = anomaly_summary(ranked)
+    return {
+        "best_price": prices[0] if prices else None,
+        "avg_price": average_price,
+        "price_spread_pct": round((prices[-1] - prices[0]) / prices[0] * 100, 1) if len(prices) >= 2 else None,
+        "anomaly_count": summary["precio_muy_alto"] + summary["precio_muy_bajo"],
+        "comparable_count": sum(is_comparable(offer) for offer in ranked),
+        "unit": unit,
+        "best_unit_price": min(unit_prices) if unit_prices else None,
+    }
 
 
 def _save_search(db, query, country, city, offers, best_price, average_price) -> int:

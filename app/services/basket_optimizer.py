@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import itertools
+import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from app.schemas import (
     BasketOptimizationRequest,
@@ -11,6 +13,48 @@ from app.schemas import (
     ProductOffer,
 )
 from app.services.product_guardrails import validate_country, validate_query
+from app.services.specs import is_comparable
+
+
+# Unidad de la linea -> (unidad de precio por unidad, factor). "unidad" (singular,
+# valor por defecto) se mantiene como "un envase"; "unidades" cuenta piezas.
+LINE_UNITS = {
+    "kg": ("kg", 1.0), "kilo": ("kg", 1.0), "kilos": ("kg", 1.0), "kgs": ("kg", 1.0),
+    "g": ("kg", 0.001), "gr": ("kg", 0.001), "gramos": ("kg", 0.001),
+    "ton": ("kg", 1000.0), "tonelada": ("kg", 1000.0), "toneladas": ("kg", 1000.0),
+    "l": ("l", 1.0), "lt": ("l", 1.0), "litro": ("l", 1.0), "litros": ("l", 1.0),
+    "ml": ("l", 0.001), "cc": ("l", 0.001),
+    "m2": ("m2", 1.0), "mt2": ("m2", 1.0), "m²": ("m2", 1.0),
+    "u": ("u", 1.0), "un": ("u", 1.0), "unidades": ("u", 1.0), "piezas": ("u", 1.0),
+}
+
+
+@dataclass(frozen=True)
+class LineCandidate:
+    offer: ProductOffer
+    packs: float | None  # envases a comprar; None si la linea ya se expresa en envases
+    cost: float
+
+
+def line_candidates(line, offers: list[ProductOffer]) -> list[LineCandidate]:
+    """Costo de cubrir la linea con cada oferta, comprando envases enteros.
+
+    Si la linea se expresa en kg/l/m2/unidades y la oferta declara su contenido,
+    se compran ceil(cantidad / contenido) envases; si ninguna oferta lo declara,
+    se asume que la cantidad ya esta en envases.
+    """
+    target = LINE_UNITS.get(line.unit.strip().casefold())
+    measured = []
+    if target:
+        unit, factor = target
+        needed = line.quantity * factor
+        for offer in offers:
+            if offer.unit == unit and offer.pack_quantity:
+                packs = math.ceil(needed / offer.pack_quantity - 1e-9)
+                measured.append(LineCandidate(offer, float(packs), packs * offer.extracted_price))
+    if measured:
+        return measured
+    return [LineCandidate(offer, None, line.quantity * offer.extracted_price) for offer in offers]
 
 
 def optimize_candidates(
@@ -21,20 +65,25 @@ def optimize_candidates(
     if len(candidates_by_line) != len(request.lines):
         raise ValueError("La cantidad de grupos de ofertas no coincide con las lineas de materiales.")
 
-    filtered = []
+    filtered: list[dict[str, LineCandidate]] = []
+    packs_assumed = []
     for line, candidates in zip(request.lines, candidates_by_line):
         valid = [
             offer for offer in candidates
-            if offer.extracted_price and offer.extracted_price > 0 and offer.anomaly_flag in (None, "ok")
+            if offer.extracted_price and offer.extracted_price > 0
+            and offer.anomaly_flag in (None, "ok") and is_comparable(offer)
         ]
         if not valid:
             raise ValueError(f"No hay ofertas comparables para '{line.query}'.")
-        cheapest_by_store = {}
-        for offer in valid:
-            store = offer.store or "Tienda no identificada"
+        options = line_candidates(line, valid)
+        if LINE_UNITS.get(line.unit.strip().casefold()) and options[0].packs is None:
+            packs_assumed.append(line.query)
+        cheapest_by_store: dict[str, LineCandidate] = {}
+        for option in options:
+            store = option.offer.store or "Tienda no identificada"
             current = cheapest_by_store.get(store)
-            if current is None or offer.extracted_price < current.extracted_price:
-                cheapest_by_store[store] = offer
+            if current is None or option.cost < current.cost:
+                cheapest_by_store[store] = option
         filtered.append(cheapest_by_store)
 
     all_stores = sorted({store for candidates in filtered for store in candidates})
@@ -44,17 +93,16 @@ def optimize_candidates(
         for subset in itertools.combinations(all_stores, size):
             selections = []
             feasible = True
-            for line, offers in zip(request.lines, filtered):
-                available = [offer for store, offer in offers.items() if store in subset]
+            for line, options in zip(request.lines, filtered):
+                available = [option for store, option in options.items() if store in subset]
                 if not available:
                     feasible = False
                     break
-                offer = min(available, key=lambda item: item.extracted_price)
-                selections.append((line, offer))
+                selections.append((line, min(available, key=lambda item: item.cost)))
             if not feasible:
                 continue
-            used_stores = {offer.store or "Tienda no identificada" for _, offer in selections}
-            merchandise = sum(line.quantity * offer.extracted_price for line, offer in selections)
+            used_stores = {option.offer.store or "Tienda no identificada" for _, option in selections}
+            merchandise = sum(option.cost for _, option in selections)
             shipping = sum(request.shipping_costs.get(store, 0.0) for store in used_stores)
             total = merchandise + shipping
             if best is None or total < best[0]:
@@ -65,18 +113,21 @@ def optimize_candidates(
 
     single_store_totals = []
     for store in all_stores:
-        if all(store in offers for offers in filtered):
-            merchandise = sum(
-                line.quantity * offers[store].extracted_price
-                for line, offers in zip(request.lines, filtered)
-            )
+        if all(store in options for options in filtered):
+            merchandise = sum(options[store].cost for options in filtered)
             single_store_totals.append(merchandise + request.shipping_costs.get(store, 0.0))
     baseline = min(single_store_totals) if single_store_totals else None
     total, merchandise, shipping, raw_selections, stores = best
     assumptions = [
         "Cada linea debe describir una especificacion comparable (marca, medida, formato y unidad).",
         "La optimizacion usa precios publicados; confirma stock y precio final antes de comprar.",
+        "Lineas en kg, l, m2 o unidades se cubren con envases enteros segun el contenido del producto.",
     ]
+    if packs_assumed:
+        assumptions.append(
+            "Sin contenido declarado en las ofertas de: " + ", ".join(packs_assumed)
+            + "; la cantidad se interpreto como numero de envases."
+        )
     if not request.shipping_costs:
         assumptions.append("No se informaron costos de despacho; el total los considera iguales a cero.")
 
@@ -86,10 +137,11 @@ def optimize_candidates(
                 query=line.query,
                 quantity=line.quantity,
                 unit=line.unit,
-                offer=offer,
-                line_total=round(line.quantity * offer.extracted_price, 0),
+                offer=option.offer,
+                packs=option.packs,
+                line_total=round(option.cost, 0),
             )
-            for line, offer in raw_selections
+            for line, option in raw_selections
         ],
         stores=stores,
         merchandise_total=round(merchandise, 0),

@@ -8,11 +8,8 @@ from typing import Generator
 
 from app.core.config import settings
 from app.schemas import ProductOffer
-from app.services.anomaly_detector import detect_price_anomalies
-from app.services.buyer_service import get_adapters
-from app.services.ml_ranker import rank_with_ml
-from app.services.normalizer import normalize_offer, semantic_deduplicate
-from app.services.ranking import rank_offers
+from app.services.buyer_service import get_adapters, process_offers, summarize_offers
+from app.services.normalizer import normalize_offer
 
 logger = logging.getLogger(__name__)
 
@@ -92,25 +89,14 @@ def search_stream(
         executor.shutdown(wait=False, cancel_futures=True)
 
     try:
-        deduplicated = semantic_deduplicate(all_offers)
-        analyzed = detect_price_anomalies(deduplicated)
-        ranked = rank_with_ml(query=query, offers=rank_offers(query=query, offers=analyzed))
+        ranked = process_offers(query, all_offers)
         final = ranked[:max_results]
-        reliable_prices = [
-            offer.extracted_price
-            for offer in ranked
-            if offer.extracted_price is not None and offer.anomaly_flag == "ok"
-        ]
+        stats = summarize_offers(ranked)
         yield _sse_event(
             {
                 "type": "done",
                 "total": len(final),
-                "best_price": min(reliable_prices) if reliable_prices else None,
-                "avg_price": (
-                    round(sum(reliable_prices) / len(reliable_prices))
-                    if reliable_prices
-                    else None
-                ),
+                **stats,
                 "offers": [_offer_to_dict(offer) for offer in final],
             }
         )

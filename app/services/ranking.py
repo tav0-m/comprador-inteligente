@@ -66,8 +66,14 @@ def _rating_score(rating, reviews):
 def _recommendation(offer: ProductOffer) -> str:
     if not offer.extracted_price:
         return "Precio no verificable; revisar manualmente."
+    if offer.relevance is not None and offer.relevance < 0.75:
+        return "Producto distinto o accesorio de lo buscado; no comparable."
+    if offer.spec_match == "mismatch":
+        return "Medida o formato distinto al buscado; comparar por precio por unidad."
     if offer.anomaly_flag in ("precio_muy_alto", "precio_muy_bajo"):
         return "Precio atipico; confirmar directamente con la tienda."
+    if offer.spec_match == "unknown":
+        return "El titulo no informa la medida buscada; verificar ficha del producto."
     if offer.score and offer.score >= 70:
         return "Oferta relevante; confirmar stock y costo total de despacho."
     return "Comparar especificacion, stock y despacho antes de comprar."

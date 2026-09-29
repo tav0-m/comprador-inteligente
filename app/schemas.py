@@ -29,6 +29,12 @@ class ProductOffer(BaseModel):
     price_vs_avg_pct: float | None = None
     free_shipping: bool | None = None
     offer_log_id: int | None = None
+    # Relevancia por especificacion y precio por unidad (app.services.specs)
+    relevance: float | None = Field(default=None, ge=0, le=1)
+    spec_match: Literal["ok", "unknown", "mismatch"] | None = None
+    pack_quantity: float | None = Field(default=None, gt=0)
+    unit: str | None = Field(default=None, max_length=10)
+    unit_price: float | None = Field(default=None, ge=0)
 
     @field_validator("currency")
     @classmethod
@@ -46,6 +52,9 @@ class SearchResponse(BaseModel):
     avg_price: float | None = None
     price_spread_pct: float | None = None
     anomaly_count: int = 0
+    comparable_count: int = 0  # ofertas que cumplen producto y especificacion buscados
+    unit: str | None = None  # unidad comun de las comparables (kg, l, m2, u)
+    best_unit_price: float | None = None
     search_id: int | None = None
     elapsed_ms: int | None = None
 
@@ -107,6 +116,7 @@ class BasketSelection(BaseModel):
     quantity: float
     unit: str
     offer: ProductOffer
+    packs: float | None = None  # envases a comprar cuando la linea se expresa en kg, l, m2 o u
     line_total: float
 
 
