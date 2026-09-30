@@ -28,3 +28,4 @@ Thumbs.db
 frontend/.env.local
 *.db.bak
 .claude/
+ci_*.db

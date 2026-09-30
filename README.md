@@ -1,127 +1,122 @@
-# Comprador Inteligente v3.0 — Constructora Chile
+# Comprador Inteligente — abastecimiento de obras en Chile
 
-Sistema profesional de comparación de precios con ML para constructoras.
-Busca en **Sodimac · Easy · Falabella · Mercado Libre Chile** y rankea con IA.
+Compara precios de materiales de construcción entre **Sodimac, Easy, Falabella y Paris**
+(Mercado Libre opcional), los normaliza por **especificación y precio por unidad**, y
+optimiza la compra de una lista de materiales entre proveedores. Mantiene un **catálogo
+propio con una serie diaria de precios** para medir tendencias y alertar oportunidades.
 
-## Arquitectura del sistema
+## Arquitectura
 
 ```
-Búsqueda
-   │
-   ├─ Sodimac CL (API interna)
-   ├─ Easy CL (API VTEX)
-   ├─ Falabella CL (API catálogo)
-   ├─ Mercado Libre CL (API pública)
-   ├─ SerpApi Google Shopping (opcional, requiere key)
-   └─ CSV local (cotizaciones manuales)
-          │
-          ▼
-   Normalización semántica (HTML clean + TF-IDF dedup)
-          │
-          ▼
-   Detección de anomalías (IQR + Isolation Forest)
-          │
-          ▼
-   ML Ranking (LightGBM — 16 features)
-          │
-          ▼
-   FastAPI /search  →  Streamlit Dashboard
+                ┌────────────── Celery beat (cada 6 h) ──────────────┐
+                ▼                                                    │
+  Tiendas ──► adaptadores ──► normalización ──► catálogo propio ◄────┘
+  (__NEXT_DATA__ / JSON-LD)   (precio vigente,   (productos + 1 precio por día
+                               tarjeta, vendedor) + salud por fuente)
+                                                        │
+  /search, /search/stream ──► ¿consulta fresca (<12 h)? ─┤ sí → responde desde la base (~50 ms)
+                                                        └ no → tiendas en vivo y guarda en catálogo
+                                   │
+                                   ▼
+        relevancia por especificación ─► anomalías (IQR + MAD) ─► ranking ─► KPIs comparables
+        (producto, medida, precio/unidad)                          (heurístico → LightGBM
+                                                                    con feedback real)
 ```
 
-## Features del ranking ML
-
-| Feature | Descripción |
+| Componente | Tecnología |
 |---|---|
-| price_ratio_to_min | Qué tan barato es vs el más barato |
-| price_ratio_to_median | Vs el precio mediano |
-| title_sim | Similitud fuzzy título/query |
-| store_trust | Confiabilidad de la tienda (Sodimac=1.0) |
-| has_free_shipping | Envío gratis |
-| rating_norm | Rating normalizado (0-1) |
-| log_reviews | Logaritmo de reseñas |
-| has_stock | Disponibilidad explícita |
-| source_* | One-hot encoding de la fuente |
+| API | FastAPI, SQLAlchemy 2, Alembic, Pydantic 2 |
+| Tareas | Celery + Redis (ingesta, alertas, reentrenamiento) |
+| Base de datos | PostgreSQL (SQLite en desarrollo) |
+| Frontend | Next.js 16, React 19, TanStack Query, Recharts |
+| ML | scikit-learn, LightGBM (LambdaRank), rapidfuzz |
 
-## Instalación
+## Qué resuelve
 
-### 1. Entrar a la carpeta
+- **Relevancia por especificación**: "cemento 25 kg" no devuelve arena de 25 kg ni cemento
+  de 1 kg; los accesorios ("mandril *para* taladro") no compiten con el producto.
+- **Precio por unidad**: CLP/kg, CLP/l, CLP/m², CLP/unidad para comparar formatos distintos.
+- **Canasta optimizada**: elige la combinación de tiendas de menor costo comprando envases
+  enteros (500 kg de cemento → 20 sacos de 25 kg).
+- **Índice de precios**: mínimo y mediana diarios de las ofertas comparables.
+- **Alertas de precio** con doble confirmación del email.
+
+## Puesta en marcha (desarrollo)
+
 ```bash
-cd "Comprador _Inteligente"
-```
-
-### 2. Crear y activar entorno virtual
-```bash
-# Windows
 python -m venv .venv
-.venv\Scripts\activate
-
-# Mac/Linux
-python -m venv .venv
-source .venv/bin/activate
-```
-
-### 3. Instalar dependencias
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configurar variables de entorno
-```bash
-# Windows
-copy .env.example .env
-
-# Mac/Linux
-cp .env.example .env
-```
-Edita `.env` y agrega tu `SERPAPI_KEY` si tienes una (opcional).
-
-### 5. Levantar la API
-```bash
+.venv\Scripts\activate            # Windows  (Mac/Linux: source .venv/bin/activate)
+pip install -r requirements-dev.txt
+copy .env.example .env            # completa ADMIN_API_KEY y APP_SECRET_KEY
+alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
-Abre: http://127.0.0.1:8000/docs
 
-### 6. Levantar el dashboard
-En otra terminal (con el venv activado):
+Frontend (Node 20+):
+
 ```bash
-streamlit run streamlit_app.py
+cd frontend
+corepack enable
+pnpm install
+pnpm dev                          # http://localhost:3000 (proxy /api → :8000)
 ```
-Abre: http://localhost:8501
 
-## Endpoints disponibles
+Ingesta programada (requiere Redis):
 
-| Endpoint | Método | Descripción |
+```bash
+celery -A app.worker worker --queues=searches,maintenance,ml
+celery -A app.worker beat
+```
+
+Todo junto con Docker: `docker compose up --build` (define `POSTGRES_PASSWORD`,
+`ADMIN_API_KEY` y `APP_SECRET_KEY` en `.env`).
+
+Genera claves con `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+## Endpoints principales
+
+| Endpoint | Acceso | Descripción |
 |---|---|---|
-| /search?q=martillo | GET | Búsqueda principal con ML |
-| /price-history?q=martillo | GET | Historial de precios |
-| /stats | GET | Estadísticas globales |
-| /history | GET | Últimas ofertas registradas |
-| /feature-importance | GET | Importancia de features del modelo |
-| /feedback | POST | Feedback usuario (mejora el modelo) |
-| /retrain | POST | Re-entrena el modelo (requiere 100+ búsquedas) |
+| `GET /search?q=` | público | Búsqueda rankeada con KPIs comparables, `data_source` y `data_as_of` |
+| `GET /search/stream?q=` | público | Igual, con avance por tienda (SSE) |
+| `POST /basket/optimize` | público | Canasta de hasta 12 materiales entre tiendas |
+| `GET /catalog/price-index?q=&days=` | público | Serie diaria de precios comparables |
+| `POST /alerts` | público | Alerta de precio (se activa al confirmar el email) |
+| `POST /feedback` | público | Voto útil/no útil (uno por cliente y oferta) |
+| `GET /catalog/status` | admin | Salud del catálogo y tasa de éxito por tienda |
+| `GET/POST/DELETE /catalog/watch` | admin | Consultas vigiladas por la ingesta |
+| `POST /tasks/ingest` | admin | Ingesta inmediata o encolada |
+| `POST /retrain` | admin | Reentrena el ranker con feedback real |
 
-## Ejemplo de uso
+Los endpoints admin requieren el encabezado `X-Admin-Key`. La documentación interactiva
+está en `/docs` fuera de producción.
+
+## Configuración relevante (`.env`)
+
+| Variable | Uso |
+|---|---|
+| `ADMIN_API_KEY`, `APP_SECRET_KEY` | Endpoints admin; firma de enlaces y seudónimos de IP |
+| `MERCADOLIBRE_CLIENT_ID/SECRET` | Activa Mercado Libre (OAuth `client_credentials`) |
+| `CATALOG_FRESHNESS_HOURS` | Antigüedad máxima para responder desde el catálogo (12) |
+| `CATALOG_INGEST_INTERVAL_HOURS` | Frecuencia de la ingesta programada (6) |
+| `TRUSTED_PROXY_CIDRS` | Proxies cuyo `X-Forwarded-For` se acepta (rate limit por IP real) |
+| `ALERT_EMAIL_*` | SMTP para confirmaciones y avisos |
+
+La lista semilla de materiales vigilados está en `data/watchlist.txt`; las búsquedas de
+los usuarios se agregan automáticamente.
+
+## Calidad
+
 ```bash
-curl "http://127.0.0.1:8000/search?q=tornillos+3+pulgadas&max_results=10"
-curl "http://127.0.0.1:8000/search?q=martillo+carpintero"
-curl "http://127.0.0.1:8000/search?q=cemento+portland+25+kg"
+pytest -q                          # sin red, Redis ni SMTP (los tests vacían las credenciales)
 ```
 
-## Productos de construcción recomendados para buscar
-- cemento portland 25 kg
-- fierro corrugado 12mm
-- tornillos volcanita 1 pulgada
-- plancha OSB 9mm
-- plancha yeso carton
-- pintura anticorrosiva
-- taladro percutor
-- amoladora 4.5 pulgadas
-- tubo PVC 4 pulgadas
-- membrana impermeabilizante
+La CI (`.github/workflows/ci.yml`) corre pytest, las migraciones desde cero y el
+typecheck/lint/build del frontend.
 
-## Re-entrenamiento del modelo ML
-Después de hacer 100+ búsquedas, el sistema puede re-entrenarse con datos reales:
-```bash
-curl -X POST http://127.0.0.1:8000/retrain
-```
-O desde el dashboard en la sección **ML Info → Re-entrenar modelo**.
+## Aviso
+
+Los precios provienen de páginas públicas de las tiendas y pueden cambiar; confirma stock,
+especificación, despacho y precio final antes de comprar. Revisa los términos de uso de
+cada tienda antes de operar comercialmente; prioriza APIs oficiales o acuerdos con
+proveedores cuando existan.
