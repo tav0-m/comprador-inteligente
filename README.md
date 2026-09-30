@@ -36,8 +36,9 @@ propio con una serie diaria de precios** para medir tendencias y alertar oportun
 - **Relevancia por especificación**: "cemento 25 kg" no devuelve arena de 25 kg ni cemento
   de 1 kg; los accesorios ("mandril *para* taladro") no compiten con el producto.
 - **Precio por unidad**: CLP/kg, CLP/l, CLP/m², CLP/unidad para comparar formatos distintos.
-- **Canasta optimizada**: elige la combinación de tiendas de menor costo comprando envases
-  enteros (500 kg de cemento → 20 sacos de 25 kg).
+- **Canasta optimizada de forma exacta** (programación entera mixta): importa el presupuesto
+  de la obra, compra envases enteros (500 kg de cemento → 20 sacos de 25 kg), considera
+  despacho, umbrales de despacho gratis y costo fijo por proveedor, y exporta la orden de compra.
 - **Índice de precios**: mínimo y mediana diarios de las ofertas comparables.
 - **Alertas de precio** con doble confirmación del email.
 
@@ -79,7 +80,9 @@ Genera claves con `python -c "import secrets; print(secrets.token_urlsafe(48))"`
 |---|---|---|
 | `GET /search?q=` | público | Búsqueda rankeada con KPIs comparables, `data_source` y `data_as_of` |
 | `GET /search/stream?q=` | público | Igual, con avance por tienda (SSE) |
-| `POST /basket/optimize` | público | Canasta de hasta 12 materiales entre tiendas |
+| `POST /basket/optimize` | público | Canasta de hasta 30 materiales: MILP exacto con despacho, umbral de despacho gratis y costo fijo por proveedor |
+| `POST /basket/import?filename=` | público | Lista de materiales `.xlsx`/`.csv` (cuerpo binario) → líneas + advertencias |
+| `POST /basket/export` | público | Orden de compra por proveedor en CSV para Excel |
 | `GET /catalog/price-index?q=&days=` | público | Serie diaria de precios comparables |
 | `POST /alerts` | público | Alerta de precio (se activa al confirmar el email) |
 | `POST /feedback` | público | Voto útil/no útil (uno por cliente y oferta) |
