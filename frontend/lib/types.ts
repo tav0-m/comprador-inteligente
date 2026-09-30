@@ -40,8 +40,27 @@ export interface SearchResponse {
   comparable_count?: number
   unit?: string | null
   best_unit_price?: number | null
+  data_source?: 'live' | 'catalog' | null
+  data_as_of?: string | null
   search_id: number | null
   elapsed_ms: number | null
+}
+
+export interface PriceIndexPoint {
+  date: string
+  offers: number
+  min_price: number
+  median_price: number
+  min_unit_price: number | null
+  median_unit_price: number | null
+}
+
+export interface PriceIndexResponse {
+  query: string
+  query_key: string
+  unit: string | null
+  days: number
+  series: PriceIndexPoint[]
 }
 
 export interface PriceHistoryPoint {

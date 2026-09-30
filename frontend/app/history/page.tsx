@@ -2,6 +2,7 @@
 import { useState }          from 'react'
 import { useQuery }           from '@tanstack/react-query'
 import { getPriceHistory }    from '@/lib/api'
+import PriceIndexChart        from '@/components/PriceIndexChart'
 import { Loader2, TrendingUp } from 'lucide-react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -15,8 +16,9 @@ function formatCLP(n: number) {
 }
 
 export default function HistoryPage() {
-  const [q, setQ] = useState('martillo')
-  const [search, setSearch] = useState('martillo')
+  const [q, setQ] = useState('cemento 25 kg')
+  const [search, setSearch] = useState('cemento 25 kg')
+  const [days, setDays] = useState(30)
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['history', search],
@@ -66,8 +68,17 @@ export default function HistoryPage() {
           onChange={e => setQ(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && setSearch(q)}
         />
+        <select className="input w-auto" aria-label="Período" value={days}
+          onChange={e => setDays(Number(e.target.value))}>
+          <option value={7}>7 días</option>
+          <option value={30}>30 días</option>
+          <option value={90}>90 días</option>
+          <option value={365}>1 año</option>
+        </select>
         <button className="btn-primary" onClick={() => setSearch(q)}>Ver historial</button>
       </div>
+
+      {search && <PriceIndexChart query={search} days={days} height={320} />}
 
       {isLoading && (
         <div className="flex items-center justify-center py-20">
@@ -93,7 +104,7 @@ export default function HistoryPage() {
         <>
           <div className="card">
             <p className="font-bold text-gray-700 mb-4">
-              Evolución de precios — <span className="text-brand-600">{search}</span>
+              Observaciones por tienda — <span className="text-brand-600">{search}</span>
               <span className="text-gray-400 font-normal ml-2 text-sm">({history.length} registros)</span>
             </p>
             <ResponsiveContainer width="100%" height={340}>

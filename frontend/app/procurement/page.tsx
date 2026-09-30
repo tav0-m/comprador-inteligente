@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { ClipboardList, Loader2, Plus, Trash2 } from 'lucide-react'
 import { optimizeBasket } from '@/lib/api'
+import { formatUnitPrice, unitLabel } from '@/lib/format'
 import type { BasketLine } from '@/lib/types'
 
 function formatCLP(value: number | null) {
@@ -15,9 +16,20 @@ function formatCLP(value: number | null) {
 
 const EMPTY_LINE: BasketLine = { query: '', quantity: 1, unit: 'unidad' }
 
+// Con kg, l, m2 o unidades el optimizador calcula envases enteros por el contenido de cada producto.
+const UNIT_SUGGESTIONS = ['kg', 'l', 'm2', 'unidades', 'unidad', 'saco', 'plancha', 'rollo']
+const MEASURED_UNITS = new Set(['kg', 'kilo', 'kilos', 'g', 'gr', 'ton', 'l', 'lt', 'litro', 'litros', 'ml',
+  'm2', 'mt2', 'm²', 'u', 'un', 'unidades', 'piezas'])
+
+function formatPacks(packs: number | null | undefined, offer: { pack_quantity?: number | null; unit?: string | null }) {
+  if (!packs) return null
+  const content = offer.pack_quantity && offer.unit ? ` de ${offer.pack_quantity} ${unitLabel(offer.unit)}` : ''
+  return `${packs} envase${packs === 1 ? '' : 's'}${content}`
+}
+
 export default function ProcurementPage() {
   const [lines, setLines] = useState<BasketLine[]>([
-    { query: 'cemento Portland 25 kg', quantity: 20, unit: 'saco' },
+    { query: 'cemento 25 kg', quantity: 500, unit: 'kg' },
     { query: 'plancha OSB 9.5 mm 1.22 x 2.44 m', quantity: 10, unit: 'plancha' },
   ])
   const [city, setCity] = useState('Santiago')
@@ -62,8 +74,11 @@ export default function ProcurementPage() {
               </label>
               <label className="col-span-5 md:col-span-2 text-xs font-semibold text-gray-500">
                 Unidad
-                <input className="input mt-1" required maxLength={40}
+                <input className="input mt-1" required maxLength={40} list="unit-suggestions"
                   value={line.unit} onChange={event => updateLine(index, {unit: event.target.value})} />
+                {MEASURED_UNITS.has(line.unit.trim().toLowerCase()) && (
+                  <span className="block mt-1 font-normal text-[11px] text-green-700">Calcula envases enteros</span>
+                )}
               </label>
               <button type="button" aria-label={`Eliminar material ${index + 1}`}
                 disabled={lines.length === 1}
@@ -74,6 +89,13 @@ export default function ProcurementPage() {
             </div>
           ))}
         </div>
+        <datalist id="unit-suggestions">
+          {UNIT_SUGGESTIONS.map(unit => <option key={unit} value={unit} />)}
+        </datalist>
+        <p className="text-xs text-gray-400">
+          Usa <strong>kg</strong>, <strong>l</strong>, <strong>m2</strong> o <strong>unidades</strong> para
+          comparar formatos distintos (p. ej. sacos de 25 y 42,5 kg); con otra unidad la cantidad se toma como envases.
+        </p>
         <button type="button" className="btn-secondary text-sm" disabled={lines.length >= 12}
           onClick={() => setLines(current => [...current, {...EMPTY_LINE}])}>
           <Plus className="w-4 h-4" /> Agregar material
@@ -103,12 +125,20 @@ export default function ProcurementPage() {
           </div>
           <div className="card overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-left border-b"><th className="py-2">Material</th><th>Tienda</th><th>Precio unitario</th><th>Cantidad</th><th>Total</th><th></th></tr></thead>
+              <thead><tr className="text-left border-b"><th className="py-2">Material</th><th>Tienda</th><th>Precio envase</th><th>Pedido</th><th>Compra</th><th>Total</th><th></th></tr></thead>
               <tbody>{result.selections.map((selection, index) => (
                 <tr key={`${selection.query}-${index}`} className="border-b border-gray-100">
                   <td className="py-3 pr-3"><p className="font-semibold">{selection.offer.title}</p><p className="text-xs text-gray-400">{selection.query}</p></td>
-                  <td>{selection.offer.store}</td><td>{formatCLP(selection.offer.extracted_price)}</td>
-                  <td>{selection.quantity} {selection.unit}</td><td className="font-bold">{formatCLP(selection.line_total)}</td>
+                  <td>{selection.offer.store}</td>
+                  <td>
+                    {formatCLP(selection.offer.extracted_price)}
+                    {selection.offer.unit_price && (
+                      <p className="text-xs text-gray-400">{formatUnitPrice(selection.offer.unit_price, selection.offer.unit)}</p>
+                    )}
+                  </td>
+                  <td>{selection.quantity} {selection.unit}</td>
+                  <td>{formatPacks(selection.packs, selection.offer) ?? `${selection.quantity} ${selection.unit}`}</td>
+                  <td className="font-bold">{formatCLP(selection.line_total)}</td>
                   <td>{selection.offer.link && <a className="text-brand-600 font-semibold" target="_blank" rel="noreferrer" href={selection.offer.link}>Ver</a>}</td>
                 </tr>
               ))}</tbody>

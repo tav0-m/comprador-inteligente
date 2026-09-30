@@ -2,6 +2,7 @@ import type {
   BasketLine,
   BasketOptimizationResponse,
   PriceHistoryPoint,
+  PriceIndexResponse,
   SearchParams,
   SearchResponse,
   StatsResponse,
@@ -43,6 +44,9 @@ export const getPriceHistory = (query: string, limit = 500) =>
   request<{ query: string; count: number; history: PriceHistoryPoint[] }>(
     urlFor('/price-history', { q: query, limit }),
   )
+
+export const getPriceIndex = (query: string, days = 30) =>
+  request<PriceIndexResponse>(urlFor('/catalog/price-index', { q: query, days }))
 
 export const getStats = () => request<StatsResponse>(urlFor('/stats'))
 

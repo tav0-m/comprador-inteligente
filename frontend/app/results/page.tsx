@@ -4,13 +4,30 @@ import { useQuery }        from '@tanstack/react-query'
 import { Suspense }        from 'react'
 import { searchProducts }  from '@/lib/api'
 import BestBanner          from '@/components/BestBanner'
+import PriceIndexChart     from '@/components/PriceIndexChart'
 import ProductCard         from '@/components/ProductCard'
 import SearchBar           from '@/components/SearchBar'
-import { Loader2, AlertCircle, ShoppingBag } from 'lucide-react'
+import { Loader2, AlertCircle, ShoppingBag, Database, Radio } from 'lucide-react'
+import { formatCLP, formatUnitPrice, timeAgo, unitLabel } from '@/lib/format'
+import type { SearchResponse } from '@/lib/types'
 
-function formatCLP(n: number | null) {
-  if (!n) return '—'
-  return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(n)
+function DataFreshness({ data }: { data: SearchResponse }) {
+  const ago = timeAgo(data.data_as_of)
+  if (data.data_source === 'catalog') {
+    return (
+      <span className="badge badge-blue text-xs">
+        <Database className="w-3 h-3" /> Catálogo propio{ago && ` · precios observados ${ago}`}
+      </span>
+    )
+  }
+  if (data.data_source === 'live') {
+    return (
+      <span className="badge badge-green text-xs">
+        <Radio className="w-3 h-3" /> Precios en vivo de las tiendas
+      </span>
+    )
+  }
+  return null
 }
 
 function ResultsInner() {
@@ -37,9 +54,9 @@ function ResultsInner() {
     <div className="flex flex-col items-center justify-center py-24 gap-4">
       <Loader2 className="w-10 h-10 text-brand-600 animate-spin" />
       <p className="text-gray-600 font-medium">
-        Buscando <strong>{q}</strong> en 6 tiendas...
+        Buscando <strong>{q}</strong> en las tiendas...
       </p>
-      <p className="text-sm text-gray-400">Sodimac · Easy · Falabella · Paris · Construmart · Mercado Libre</p>
+      <p className="text-sm text-gray-400">Sodimac · Easy · Falabella · Paris</p>
     </div>
   )
 
@@ -73,13 +90,15 @@ function ResultsInner() {
         <SearchBar defaultQuery={q} defaultCountry={country} />
       </div>
 
-      {/* Summary metrics */}
+      {/* Summary metrics: calculadas solo sobre ofertas comparables */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
           { label: '🏆 Mejor precio',   value: formatCLP(data.best_price) },
-          { label: '📊 Precio promedio', value: formatCLP(data.avg_price) },
-          { label: '📉 Dispersión',       value: data.price_spread_pct ? `${data.price_spread_pct.toFixed(1)}%` : '—' },
-          { label: `${data.anomaly_count ? '🔴' : '🟢'} Anomalías`, value: data.anomaly_count },
+          data.unit && data.best_unit_price
+            ? { label: `⚖️ Mejor precio por ${unitLabel(data.unit)}`, value: formatUnitPrice(data.best_unit_price, data.unit) ?? '—' }
+            : { label: '📊 Precio promedio', value: formatCLP(data.avg_price) },
+          { label: '✅ Ofertas comparables', value: data.comparable_count ?? '—' },
+          { label: `${data.anomaly_count ? '🔴' : '🟢'} Precios atípicos`, value: data.anomaly_count },
         ].map(m => (
           <div key={m.label} className="card text-center">
             <p className="text-xs text-gray-500 mb-1">{m.label}</p>
@@ -91,11 +110,19 @@ function ResultsInner() {
       {/* Best offer banner */}
       <BestBanner offer={best} />
 
-      {/* Results count */}
-      <p className="text-sm text-gray-500">
-        <strong className="text-gray-800">{offers.length}</strong> resultados para{' '}
-        <strong className="text-brand-600">«{q}»</strong>
-      </p>
+      <PriceIndexChart query={data.query} />
+
+      {/* Results count and data freshness */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-gray-500">
+          <strong className="text-gray-800">{offers.length}</strong> resultados para{' '}
+          <strong className="text-brand-600">«{q}»</strong>
+          {data.price_spread_pct !== null && (
+            <span className="ml-2 text-gray-400">· dispersión {data.price_spread_pct.toFixed(1)}%</span>
+          )}
+        </p>
+        <DataFreshness data={data} />
+      </div>
 
       {/* Cards grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">

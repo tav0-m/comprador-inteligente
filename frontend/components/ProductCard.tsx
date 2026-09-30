@@ -5,21 +5,7 @@ import { AlertTriangle, ExternalLink, Star, ThumbsDown, ThumbsUp, TrendingDown, 
 import { clsx } from 'clsx'
 import type { ProductOffer } from '@/lib/types'
 import { submitFeedback } from '@/lib/api'
-
-function formatCLP(value: number | null): string {
-  if (value === null) return 'Sin precio'
-  return new Intl.NumberFormat('es-CL', {
-    style: 'currency', currency: 'CLP', maximumFractionDigits: 0,
-  }).format(value)
-}
-
-function formatUnitPrice(offer: ProductOffer): string | null {
-  if (!offer.unit_price || !offer.unit) return null
-  const value = new Intl.NumberFormat('es-CL', {
-    style: 'currency', currency: 'CLP', maximumFractionDigits: offer.unit_price < 100 ? 1 : 0,
-  }).format(offer.unit_price)
-  return `${value} / ${offer.unit === 'u' ? 'unidad' : offer.unit}`
-}
+import { formatCLP, formatUnitPrice } from '@/lib/format'
 
 const STORE_COLORS: Record<string, string> = {
   Sodimac: 'bg-orange-100 text-orange-700',
@@ -42,7 +28,7 @@ export default function ProductCard({ offer, isBest, rank }: Props) {
   const anomalyLow = offer.anomaly_flag === 'precio_muy_bajo'
   const store = offer.store ?? 'Tienda no identificada'
   const storeColor = STORE_COLORS[store] ?? 'bg-gray-100 text-gray-700'
-  const unitPrice = formatUnitPrice(offer)
+  const unitPrice = formatUnitPrice(offer.unit_price, offer.unit)
   const specMismatch = offer.spec_match === 'mismatch'
   const showSeller = offer.seller && offer.seller.toLowerCase() !== store.toLowerCase()
 
@@ -75,7 +61,7 @@ export default function ProductCard({ offer, isBest, rank }: Props) {
 
       <div>
         <p className={clsx('text-2xl font-black', isBest ? 'text-success-600' : 'text-brand-600')}>
-          {formatCLP(offer.extracted_price)}
+          {offer.extracted_price === null ? 'Sin precio' : formatCLP(offer.extracted_price)}
         </p>
         {unitPrice && <p className="text-xs font-semibold text-gray-500">{unitPrice}</p>}
         {offer.price_vs_avg_pct !== null && (

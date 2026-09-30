@@ -1,23 +1,22 @@
 import type { ProductOffer } from '@/lib/types'
 import { ExternalLink, Truck, ShieldCheck } from 'lucide-react'
-
-function formatCLP(n: number | null): string {
-  if (!n) return '—'
-  return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(n)
-}
+import { formatCLP, formatUnitPrice } from '@/lib/format'
 
 export default function BestBanner({ offer }: { offer: ProductOffer }) {
+  const unitPrice = formatUnitPrice(offer.unit_price, offer.unit)
+  const showSeller = offer.seller && offer.seller.toLowerCase() !== (offer.store ?? '').toLowerCase()
   return (
     <div className="rounded-2xl p-6 text-white mb-6 flex items-center justify-between flex-wrap gap-4"
          style={{ background: 'linear-gradient(135deg, #1b5e20 0%, #2e7d32 50%, #388e3c 100%)' }}>
       <div className="flex-1 min-w-0">
         <p className="text-xs font-bold uppercase tracking-widest text-green-300 mb-1">
-          ⭐ Mejor opción según IA
+          ⭐ Mejor opción comparable
         </p>
         <p className="font-bold text-lg leading-snug truncate">{offer.title}</p>
-        <p className="text-green-200 text-sm mt-1 flex items-center gap-2">
+        <p className="text-green-200 text-sm mt-1 flex items-center gap-2 flex-wrap">
           <ShieldCheck className="w-4 h-4" />
           {offer.store}
+          {showSeller && <span className="text-green-300">· vendido por {offer.seller}</span>}
           {offer.free_shipping && (
             <span className="flex items-center gap-1 bg-white/20 px-2 py-0.5 rounded-full text-xs">
               <Truck className="w-3 h-3" /> Envío gratis
@@ -27,6 +26,7 @@ export default function BestBanner({ offer }: { offer: ProductOffer }) {
       </div>
       <div className="text-right shrink-0">
         <p className="text-4xl font-black">{formatCLP(offer.extracted_price)}</p>
+        {unitPrice && <p className="text-green-200 text-sm font-semibold">{unitPrice}</p>}
         {offer.link ? (
           <a
             href={offer.link}
