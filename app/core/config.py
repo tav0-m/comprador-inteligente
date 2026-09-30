@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     mercadolibre_client_secret: str = ""
     enable_serpapi: bool = False
     enable_mercadolibre: bool = True
-    enable_local_csv: bool = True
+    # data/local_products.csv trae datos de DEMOSTRACION: activar solo con cotizaciones reales.
+    enable_local_csv: bool = False
     enable_sodimac: bool = True
     enable_easy: bool = True
     enable_falabella: bool = True

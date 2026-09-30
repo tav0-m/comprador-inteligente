@@ -1,6 +1,8 @@
 import type {
   BasketLine,
   BasketOptimizationResponse,
+  BomImportResponse,
+  StoreTerms,
   PriceHistoryPoint,
   PriceIndexResponse,
   SearchParams,
@@ -69,17 +71,52 @@ export const submitFeedback = (offerLogId: number, useful: boolean) =>
     body: JSON.stringify({ offer_log_id: offerLogId, useful }),
   })
 
-export const optimizeBasket = (data: {
+export interface BasketRequest {
   lines: BasketLine[]
   country: string
   city?: string
   max_stores: number
-  shipping_costs: Record<string, number>
-}) => request<BasketOptimizationResponse>(urlFor('/basket/optimize'), {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(data),
-})
+  store_terms: Record<string, StoreTerms>
+}
+
+export const optimizeBasket = (data: BasketRequest) =>
+  request<BasketOptimizationResponse>(urlFor('/basket/optimize'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+
+/** Sube la lista (.xlsx/.csv) como cuerpo binario; el backend no requiere multipart. */
+export const importBom = (file: File) =>
+  request<BomImportResponse>(urlFor('/basket/import', { filename: file.name }), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+
+/** Descarga la orden de compra (CSV para Excel) de la canasta optimizada. */
+export async function downloadPurchaseOrder(data: BasketRequest): Promise<void> {
+  const response = await fetch(urlFor('/basket/export'), {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!response.ok) {
+    let detail = `Error ${response.status}`
+    try {
+      const body = await response.json()
+      detail = body.detail ?? detail
+    } catch { /* respuesta no JSON */ }
+    throw new Error(detail)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'orden_de_compra.csv'
+  link.click()
+  URL.revokeObjectURL(url)
+}
 
 export const getHealth = () => request<{
   status: string

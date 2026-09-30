@@ -92,6 +92,8 @@ def default_rules(settings) -> dict[tuple[str, str], RateRule]:
         ("GET", "/search/stream"): RateRule("search_stream", settings.rate_limit_per_minute, 60),
         ("POST", "/search/async"): RateRule("search_async", settings.rate_limit_per_minute, 60),
         ("POST", "/basket/optimize"): RateRule("basket", max(1, settings.rate_limit_per_minute // 3), 60),
+        ("POST", "/basket/export"): RateRule("basket", max(1, settings.rate_limit_per_minute // 3), 60),
+        ("POST", "/basket/import"): RateRule("basket_import", 20, 60),
         ("POST", "/feedback"): RateRule("feedback", settings.feedback_limit_per_minute, 60),
         ("POST", "/alerts"): RateRule("alert_create", settings.alert_create_limit_per_hour, 3600),
         ("GET", "/alerts/confirm"): RateRule("alert_token", 30, 3600),

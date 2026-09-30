@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -23,6 +23,7 @@ from app.schemas import (
     AlertCreateRequest,
     BasketOptimizationRequest,
     BasketOptimizationResponse,
+    BomImportResponse,
     FeedbackRequest,
     SearchResponse,
 )
@@ -164,6 +165,43 @@ def optimize_basket(request: BasketOptimizationRequest, db: Session = Depends(ge
     except Exception as exc:
         logger.exception("Error optimizando canasta")
         raise HTTPException(status_code=500, detail="No fue posible optimizar la canasta.") from exc
+
+
+@app.post("/basket/import", response_model=BomImportResponse, tags=["Abastecimiento"])
+async def import_basket(request: Request, filename: str = Query("", max_length=200)):
+    """Lee una lista de materiales (.xlsx o .csv) enviada como cuerpo binario.
+
+    Devuelve las lineas detectadas y advertencias para revisarlas antes de optimizar.
+    """
+    from app.services.bom_import import MAX_FILE_BYTES, BomImportError, parse_bom
+
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="El archivo supera 2 MB.")
+    content = await request.body()
+    try:
+        return parse_bom(filename, content)
+    except BomImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Importacion de lista fallida: %s", exc)
+        raise HTTPException(status_code=400, detail="No fue posible leer el archivo.") from exc
+
+
+@app.post("/basket/export", tags=["Abastecimiento"])
+def export_basket(request: BasketOptimizationRequest, db: Session = Depends(get_db)):
+    """Optimiza la canasta y devuelve la orden de compra por proveedor en CSV (Excel)."""
+    from app.services.basket_optimizer import purchase_order_csv, search_and_optimize
+
+    try:
+        result = search_and_optimize(request, lambda **kwargs: search_products(db=db, **kwargs))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=purchase_order_csv(result).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="orden_de_compra.csv"'},
+    )
 
 
 @app.get("/price-history", tags=["Analisis"])

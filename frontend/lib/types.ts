@@ -93,6 +93,33 @@ export interface BasketLine {
   unit: string
 }
 
+export interface StoreTerms {
+  shipping_cost: number
+  free_shipping_threshold: number | null
+  fixed_cost: number
+}
+
+export interface StoreBreakdown {
+  store: string
+  lines: number
+  merchandise: number
+  shipping: number
+  fixed_cost: number
+  free_shipping: boolean
+  total: number
+}
+
+export interface BomImportLine extends BasketLine {
+  source_row: number
+}
+
+export interface BomImportResponse {
+  lines: BomImportLine[]
+  warnings: string[]
+  rows_read: number
+  rows_skipped: number
+}
+
 export interface BasketSelection {
   query: string
   quantity: number
@@ -105,9 +132,12 @@ export interface BasketSelection {
 export interface BasketOptimizationResponse {
   selections: BasketSelection[]
   stores: string[]
+  store_breakdown: StoreBreakdown[]
   merchandise_total: number
   shipping_total: number
+  fixed_cost_total: number
   total_cost: number
+  solver: string
   single_store_baseline: number | null
   estimated_savings: number | null
   assumptions: string[]
