@@ -267,8 +267,11 @@ def catalog_status(db: Session, hours: int = 24) -> dict:
             "avg_duration_ms": round(sum(durations) / len(durations)) if durations else None,
             "last_error": next((run.error for run in sorted(items, key=lambda r: r.id, reverse=True) if run.error), None),
         }
+    from app.services.sources import get_adapters, source_name
+
     last_ingestion = db.query(func.max(WatchQuery.last_ingested_at)).scalar()
     return {
+        "active_sources": sorted(source_name(adapter) for adapter in get_adapters()),
         "products": db.query(func.count(CatalogProduct.id)).scalar() or 0,
         "observations": db.query(func.count(PriceObservation.id)).scalar() or 0,
         "watch_queries_active": db.query(func.count(WatchQuery.id)).filter(WatchQuery.active.is_(True)).scalar() or 0,

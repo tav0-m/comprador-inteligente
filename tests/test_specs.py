@@ -70,3 +70,12 @@ class TestAnnotate:
         ])
         assert offers[0].unit == "kg" and offers[0].unit_price == pytest.approx(203.6)
         assert [is_comparable(o) for o in offers] == [True, False, False]
+
+
+class TestFormWords:
+    def test_palabra_de_formato_es_opcional(self):
+        assert core_terms("plancha osb 15 mm") == ["osb"]
+        assert relevance("plancha osb 15 mm", "Tablero OSB Estructural 15 mm 122x244 cm") == 1
+
+    def test_formato_solo_sigue_siendo_nucleo(self):
+        assert core_terms("plancha 15 mm") == ["plancha"]

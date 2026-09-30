@@ -32,7 +32,8 @@ def get_adapters():
     adapters = []
     if settings.enable_serpapi and settings.serpapi_key:
         adapters.append(SerpApiGoogleShoppingAdapter())
-    if settings.enable_mercadolibre:
+    # Sin credenciales OAuth la API responde 403: no se lista como fuente activa.
+    if settings.enable_mercadolibre and settings.mercadolibre_client_id and settings.mercadolibre_client_secret:
         adapters.append(MercadoLibreAdapter())
     if settings.enable_sodimac:
         adapters.append(SodimacAdapter())

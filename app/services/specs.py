@@ -59,6 +59,9 @@ _STOPWORDS = {
     "por", "un", "una", "x", "tipo", "marca", "color", "caja", "pack", "saco", "bolsa",
     "unidad", "unidades", "precio", "barato", "oferta",
 }
+# Palabras de formato: cada tienda usa la suya ("plancha OSB" = "tablero OSB" = "OSB").
+# Solo son nucleo si la consulta no tiene otro termino ("plancha 15 mm").
+_FORM_WORDS = {"plancha", "tablero", "placa", "panel", "lamina", "hoja"}
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,8 @@ def core_terms(query: str) -> list[str]:
         stem = _stem(token)
         if stem not in terms:
             terms.append(stem)
-    return terms
+    specific = [term for term in terms if term not in _FORM_WORDS]
+    return specific or terms
 
 
 def relevance(query: str, title: str) -> float:

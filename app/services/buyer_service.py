@@ -41,7 +41,7 @@ def search_products(
         response.elapsed_ms = round((time.perf_counter() - started) * 1000)
         return response
 
-    catalog_hit = _catalog_offers(db, query) if use_cache else None
+    catalog_hit = load_catalog_offers(db, query) if use_cache else None
     if catalog_hit:
         raw_offers, data_as_of = catalog_hit
         data_source, runs = "catalog", []
@@ -56,7 +56,7 @@ def search_products(
         db, query, country, city, ranked, stats["best_price"], stats["avg_price"],
         record_history=data_source == "live",
     )
-    _update_catalog(db, query, raw_offers, runs, live=data_source == "live")
+    update_catalog(db, query, raw_offers, runs, live=data_source == "live")
     response = SearchResponse(
         query=query,
         country=country,
@@ -74,7 +74,7 @@ def search_products(
     return response
 
 
-def _catalog_offers(db: Session, query: str):
+def load_catalog_offers(db: Session, query: str):
     """Ofertas frescas del catalogo propio; None si no hay o fallo la lectura."""
     from app.services.catalog import fresh_offers
 
@@ -86,7 +86,7 @@ def _catalog_offers(db: Session, query: str):
         return None
 
 
-def _update_catalog(db: Session, query: str, offers: list[ProductOffer], runs: list, live: bool) -> None:
+def update_catalog(db: Session, query: str, offers: list[ProductOffer], runs: list, live: bool) -> None:
     """Registra la demanda y, si fue en vivo, guarda las ofertas en el catalogo.
 
     Nunca interrumpe la busqueda: un fallo del catalogo solo se registra.
