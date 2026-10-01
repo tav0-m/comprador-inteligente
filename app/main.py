@@ -505,6 +505,28 @@ def catalog_price_index(
     return price_index(db, query, days)
 
 
+@app.get("/catalog/opportunities", tags=["Catalogo"])
+def catalog_opportunities(
+    q: str | None = Query(None, min_length=2, max_length=120),
+    min_drop: float = Query(10, ge=1, le=80),
+    days: int = Query(60, ge=7, le=365),
+    min_days: int = Query(5, ge=3, le=120),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Productos con precio de hoy bajo su mediana historica (senal de compra)."""
+    from app.services.catalog import price_opportunities
+    from app.services.product_guardrails import validate_query
+
+    query = None
+    if q:
+        try:
+            query = validate_query(q)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return price_opportunities(db, query, min_drop, days, min_days, limit)
+
+
 @app.get("/catalog/status", tags=["Administracion"], dependencies=[Depends(require_admin)])
 def catalog_status_endpoint(hours: int = Query(24, ge=1, le=720), db: Session = Depends(get_db)):
     from app.services.catalog import catalog_status

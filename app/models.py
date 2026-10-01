@@ -94,6 +94,8 @@ class CatalogProduct(Base):
     store = Column(String(150), nullable=True, index=True)
     seller = Column(String(150), nullable=True)
     title = Column(String(500), nullable=False)
+    # Titulo normalizado (minusculas, sin tildes) para buscar con LIKE / pg_trgm.
+    search_text = Column(String(500), nullable=True)
     link = Column(String, nullable=True)
     thumbnail = Column(String, nullable=True)
     currency = Column(String(3), default="CLP")

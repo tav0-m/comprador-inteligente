@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import CatalogProduct, CatalogQueryHit, IngestionRun, PriceObservation, WatchQuery
 from app.schemas import ProductOffer
-from app.services.specs import annotate_offers, canonical, dominant_unit, is_comparable
+from app.services.specs import annotate_offers, canonical, core_terms, dominant_unit, is_comparable
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ def record_offers(db: Session, query: str, offers: list[ProductOffer], runs: lis
         product.store = offer.store
         product.seller = offer.seller
         product.title = offer.title[:500]
+        product.search_text = canonical(offer.title)[:500]
         product.link = offer.link
         product.thumbnail = offer.thumbnail
         product.currency = offer.currency or "CLP"
@@ -205,6 +206,41 @@ def fresh_offers(db: Session, query: str, max_age_hours: int) -> tuple[list[Prod
     return [_to_offer(product) for product in products], ingested_at
 
 
+TEXT_SEARCH_MIN_COMPARABLE = 3
+TEXT_SEARCH_MIN_STORES = 2
+TEXT_SEARCH_LIMIT = 400
+
+
+def text_search_offers(db: Session, query: str, max_age_hours: int) -> tuple[list[ProductOffer], datetime] | None:
+    """Responde consultas no vigiladas con productos frescos del catalogo que la cubren.
+
+    Busca productos cuyo titulo contiene todos los terminos nucleo (sin tildes,
+    via search_text). Solo se usa si hay suficientes ofertas comparables en
+    varias tiendas: "cemento melon 25 kg" puede salir de lo ingerido por
+    "cemento 25 kg" sin consultar las tiendas; con cobertura insuficiente se
+    vuelve a la busqueda en vivo.
+    """
+    terms = core_terms(query)
+    if not terms:
+        return None
+    since = utcnow() - timedelta(hours=max_age_hours)
+    statement = db.query(CatalogProduct).filter(CatalogProduct.last_seen_at >= since)
+    for term in terms:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        statement = statement.filter(CatalogProduct.search_text.like(f"%{escaped}%", escape="\\"))
+    products = statement.order_by(CatalogProduct.last_seen_at.desc()).limit(TEXT_SEARCH_LIMIT).all()
+    if not products:
+        return None
+
+    offers = annotate_offers(query, [_to_offer(product) for product in products])
+    comparable = [(offer, product) for offer, product in zip(offers, products) if is_comparable(offer)]
+    stores = {offer.store for offer, _ in comparable}
+    if len(comparable) < TEXT_SEARCH_MIN_COMPARABLE or len(stores) < TEXT_SEARCH_MIN_STORES:
+        return None
+    oldest = min(as_utc(product.last_seen_at) for _, product in comparable)
+    return [_to_offer(product) for product in products], oldest
+
+
 def price_index(db: Session, query: str, days: int = 30) -> dict:
     """Serie diaria de precios de las ofertas comparables de una consulta.
 
@@ -247,6 +283,78 @@ def price_index(db: Session, query: str, days: int = 30) -> dict:
             "median_unit_price": round(median(unit_prices), 2) if unit_prices else None,
         })
     return {"query": query, "query_key": key, "unit": unit, "days": days, "series": series}
+
+
+MAX_PLAUSIBLE_DROP_PCT = 80.0  # caidas mayores suelen ser errores de publicacion o de parseo
+
+
+def price_opportunities(
+    db: Session,
+    query: str | None = None,
+    min_drop_pct: float = 10.0,
+    days: int = 60,
+    min_days_observed: int = 5,
+    limit: int = 50,
+) -> dict:
+    """Productos cuyo precio de hoy esta bajo su propia mediana historica.
+
+    Compara cada producto consigo mismo (no con otros formatos): el precio
+    observado el dia mas reciente contra la mediana diaria de los dias previos
+    dentro de la ventana. Exige historia minima y descarta caidas inverosimiles.
+    """
+    today = utcnow().date()
+    since = today - timedelta(days=days)
+    statement = (
+        db.query(PriceObservation, CatalogProduct)
+        .join(CatalogProduct, CatalogProduct.id == PriceObservation.product_id)
+        .filter(PriceObservation.observed_on >= since)
+    )
+    if query:
+        statement = statement.join(CatalogQueryHit, CatalogQueryHit.product_id == CatalogProduct.id).filter(
+            CatalogQueryHit.query_key == query_key(query)
+        )
+
+    history: dict[int, list] = defaultdict(list)
+    products: dict[int, CatalogProduct] = {}
+    for observation, product in statement.all():
+        history[product.id].append((observation.observed_on, observation.min_price))
+        products[product.id] = product
+
+    opportunities = []
+    for product_id, points in history.items():
+        points = sorted(set(points))
+        latest_day, current = points[-1]
+        previous = [price for day, price in points[:-1]]
+        if latest_day < today - timedelta(days=1) or len(previous) < min_days_observed - 1:
+            continue  # sin observacion reciente o historia insuficiente
+        reference = median(previous)
+        if reference <= 0:
+            continue
+        drop_pct = (reference - current) / reference * 100
+        if drop_pct < min_drop_pct or drop_pct > MAX_PLAUSIBLE_DROP_PCT:
+            continue
+        product = products[product_id]
+        opportunities.append({
+            "title": product.title,
+            "store": product.store,
+            "seller": product.seller,
+            "link": product.link,
+            "current_price": current,
+            "median_price": round(reference, 0),
+            "min_price_window": min(previous),
+            "drop_pct": round(drop_pct, 1),
+            "is_window_low": current < min(previous),
+            "days_observed": len(points),
+            "observed_on": latest_day.isoformat(),
+        })
+    opportunities.sort(key=lambda item: item["drop_pct"], reverse=True)
+    return {
+        "query": query,
+        "min_drop_pct": min_drop_pct,
+        "days": days,
+        "count": len(opportunities),
+        "opportunities": opportunities[:limit],
+    }
 
 
 def catalog_status(db: Session, hours: int = 24) -> dict:

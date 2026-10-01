@@ -76,10 +76,13 @@ def search_products(
 
 def load_catalog_offers(db: Session, query: str):
     """Ofertas frescas del catalogo propio; None si no hay o fallo la lectura."""
-    from app.services.catalog import fresh_offers
+    from app.services.catalog import fresh_offers, text_search_offers
 
     try:
-        return fresh_offers(db, query, settings.catalog_freshness_hours)
+        return (
+            fresh_offers(db, query, settings.catalog_freshness_hours)
+            or text_search_offers(db, query, settings.catalog_freshness_hours)
+        )
     except Exception as exc:
         db.rollback()
         logger.warning("[Catalogo] Lectura fallida; se consulta en vivo: %s", exc)

@@ -176,3 +176,72 @@ class TestCatalogApi:
         created = client.post("/catalog/watch", json={"query": "zinc acanalado admin"}, headers=headers)
         assert created.status_code == 200
         assert client.delete(f"/catalog/watch/{created.json()['id']}", headers=headers).status_code == 200
+
+
+class TestTextSearch:
+    def _ingest(self, db):
+        items = [offer("Cemento Kappa Melón 25 kg", 5090), offer("Cemento Kappa Melón 25 kg", 5190, store="Easy"),
+                 offer("Cemento Kappa Melón especial 25 kg", 4990, store="Falabella"),
+                 offer("Cemento Kappa Polpaico 25 kg", 4890, store="Paris")]
+        catalog.record_offers(db, "cemento kappa 25 kg", items, [], trigger="scheduled")
+
+    def test_consulta_no_vigilada_sale_del_catalogo(self, db, monkeypatch):
+        self._ingest(db)
+        calls = []
+        monkeypatch.setattr(buyer_service, "fetch_live_offers", fake_fetch(lambda: [], calls))
+        result = buyer_service.search_products(db, "cemento kappa melon 25 kg")  # sin tilde en la consulta
+        assert result.data_source == "catalog" and calls == []
+        assert {o.store for o in result.offers} == {"Sodimac", "Easy", "Falabella"}  # Polpaico no calza
+
+    def test_cobertura_insuficiente_va_en_vivo(self, db, monkeypatch):
+        self._ingest(db)
+        calls = []
+        monkeypatch.setattr(buyer_service, "fetch_live_offers", fake_fetch(lambda: [], calls))
+        buyer_service.search_products(db, "cemento kappa polpaico 25 kg")  # 1 tienda: no alcanza
+        assert calls == ["cemento kappa polpaico 25 kg"]
+
+    def test_productos_viejos_no_se_usan(self, db):
+        from app.models import CatalogProduct
+
+        self._ingest(db)
+        for product in db.query(CatalogProduct).filter(CatalogProduct.search_text.like("%kappa%")):
+            product.last_seen_at = catalog.utcnow() - timedelta(days=3)
+        db.commit()
+        assert catalog.text_search_offers(db, "cemento kappa melon 25 kg", 12) is None
+
+
+class TestOpportunities:
+    def _product_with_history(self, db, title: str, history: list[float], today_price: float):
+        from app.models import CatalogProduct, PriceObservation
+
+        catalog.record_offers(db, "oportunidad " + title, [offer(title, today_price)], [], trigger="scheduled")
+        product = db.query(CatalogProduct).filter(CatalogProduct.title == title).one()
+        today = catalog.utcnow().date()
+        for days_ago, price in enumerate(history, start=1):
+            db.add(PriceObservation(product_id=product.id, observed_on=today - timedelta(days=days_ago),
+                                    price=price, min_price=price))
+        db.commit()
+
+    def test_detecta_caida_bajo_mediana(self, db):
+        self._product_with_history(db, "Taladro Sigma 750W", [50_000, 49_000, 51_000, 50_000, 50_500], 42_000)
+        self._product_with_history(db, "Taladro Sigma estable", [50_000] * 5, 49_500)        # -1%: no
+        self._product_with_history(db, "Taladro Sigma error", [50_000] * 5, 4_000)            # -92%: inverosimil
+        self._product_with_history(db, "Taladro Sigma nuevo", [50_000], 30_000)               # poca historia
+        result = catalog.price_opportunities(db, min_drop_pct=10)
+        titles = [item["title"] for item in result["opportunities"]]
+        assert "Taladro Sigma 750W" in titles
+        assert not {"Taladro Sigma estable", "Taladro Sigma error", "Taladro Sigma nuevo"} & set(titles)
+        item = next(i for i in result["opportunities"] if i["title"] == "Taladro Sigma 750W")
+        assert item["median_price"] == 50_000 and item["drop_pct"] == 16.0 and item["is_window_low"] is True
+
+    def test_filtra_por_consulta_y_api(self, db):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        self._product_with_history(db, "Esmeril Omega 4", [30_000] * 6, 24_000)
+        filtered = catalog.price_opportunities(db, query="oportunidad Esmeril Omega 4")
+        assert [item["title"] for item in filtered["opportunities"]] == ["Esmeril Omega 4"]
+        with TestClient(app) as client:
+            response = client.get("/catalog/opportunities", params={"min_drop": 15})
+        assert response.status_code == 200
+        assert any(item["title"] == "Esmeril Omega 4" for item in response.json()["opportunities"])
