@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     catalog_ingest_batch: int = Field(default=40, ge=1, le=500)
     catalog_ingest_limit_per_source: int = Field(default=48, ge=10, le=150)
     catalog_max_watch_queries: int = Field(default=500, ge=10, le=10_000)
+    # Materiales de una canasta buscados en paralelo (cada uno consulta varias tiendas).
+    basket_search_workers: int = Field(default=3, ge=1, le=8)
 
     serpapi_key: str | None = None
     mercadolibre_client_id: str = ""

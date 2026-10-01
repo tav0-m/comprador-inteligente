@@ -151,15 +151,21 @@ def search_stream(
     )
 
 
+def _isolated_search(**kwargs):
+    """search_products con sesion propia: permite buscar lineas de la canasta en paralelo."""
+    db = SessionLocal()
+    try:
+        return search_products(db=db, **kwargs)
+    finally:
+        db.close()
+
+
 @app.post("/basket/optimize", response_model=BasketOptimizationResponse, tags=["Abastecimiento"])
-def optimize_basket(request: BasketOptimizationRequest, db: Session = Depends(get_db)):
+def optimize_basket(request: BasketOptimizationRequest):
     from app.services.basket_optimizer import search_and_optimize
 
     try:
-        return search_and_optimize(
-            request,
-            lambda **kwargs: search_products(db=db, **kwargs),
-        )
+        return search_and_optimize(request, _isolated_search, max_workers=settings.basket_search_workers)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -189,12 +195,12 @@ async def import_basket(request: Request, filename: str = Query("", max_length=2
 
 
 @app.post("/basket/export", tags=["Abastecimiento"])
-def export_basket(request: BasketOptimizationRequest, db: Session = Depends(get_db)):
+def export_basket(request: BasketOptimizationRequest):
     """Optimiza la canasta y devuelve la orden de compra por proveedor en CSV (Excel)."""
     from app.services.basket_optimizer import purchase_order_csv, search_and_optimize
 
     try:
-        result = search_and_optimize(request, lambda **kwargs: search_products(db=db, **kwargs))
+        result = search_and_optimize(request, _isolated_search, max_workers=settings.basket_search_workers)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(

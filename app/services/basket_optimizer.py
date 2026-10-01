@@ -24,6 +24,7 @@ import io
 import math
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -251,19 +252,35 @@ def optimize_candidates(
 def search_and_optimize(
     request: BasketOptimizationRequest,
     search_fn: Callable[..., object],
+    max_workers: int = 1,
 ) -> BasketOptimizationResponse:
+    """Busca cada material (en paralelo si max_workers > 1) y optimiza la canasta.
+
+    Con max_workers > 1, search_fn debe ser seguro entre hilos (p. ej. abrir su
+    propia sesion de base de datos). Materiales repetidos se buscan una vez.
+    """
     request.country = validate_country(request.country)
-    candidates = []
     for line in request.lines:
         line.query = validate_query(line.query)
-        response = search_fn(
-            query=line.query,
+    queries = list(dict.fromkeys(line.query for line in request.lines))
+
+    def search(query: str):
+        return search_fn(
+            query=query,
             country=request.country,
             city=request.city,
             max_results=request.max_results_per_line,
             use_cache=True,
-        )
-        candidates.append(response.offers)
+        ).offers
+
+    workers = max(1, min(max_workers, len(queries)))
+    if workers == 1:
+        results = {query: search(query) for query in queries}
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="basket") as executor:
+            results = dict(zip(queries, executor.map(search, queries)))
+    # Copias por linea: el optimizador anota cada oferta y dos lineas pueden compartir busqueda.
+    candidates = [[offer.model_copy() for offer in results[line.query]] for line in request.lines]
     return optimize_candidates(request, candidates)
 
 

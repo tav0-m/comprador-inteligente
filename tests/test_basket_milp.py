@@ -115,3 +115,46 @@ def test_orden_de_compra_csv():
     assert csv_text.startswith("﻿Proveedor;Material solicitado")
     assert "A;material 0;Cemento 25 kg;1;unidad;;5090;;5090;" in csv_text
     assert "TOTAL;2;18080;4000;0;22080" in csv_text
+
+
+class TestSearchAndOptimize:
+    def _search_fn(self, calls, delay=0.0):
+        import threading
+        import time
+        from types import SimpleNamespace
+
+        lock = threading.Lock()
+
+        def search_fn(query, **kwargs):
+            with lock:
+                calls.append(query)
+            time.sleep(delay)
+            price = 1_000 + 100 * int(query.split()[-1])
+            return SimpleNamespace(offers=[offer("A", price, query), offer("B", price + 50, query)])
+        return search_fn
+
+    def test_paralelo_mantiene_orden_y_es_mas_rapido(self):
+        import time
+
+        from app.services.basket_optimizer import search_and_optimize
+
+        calls = []
+        req = request(6)
+        started = time.perf_counter()
+        result = search_and_optimize(req, self._search_fn(calls, delay=0.2), max_workers=3)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.8  # secuencial tomaria >= 1.2 s
+        assert [s.query for s in result.selections] == [f"material {i}" for i in range(6)]
+        assert [s.line_total for s in result.selections] == [1_000 + 100 * i for i in range(6)]
+
+    def test_materiales_repetidos_se_buscan_una_vez(self):
+        from app.services.basket_optimizer import search_and_optimize
+
+        calls = []
+        req = BasketOptimizationRequest(lines=[
+            BasketLineRequest(query="material 1", quantity=1, unit="unidad"),
+            BasketLineRequest(query="material 1", quantity=3, unit="unidad"),
+        ])
+        result = search_and_optimize(req, self._search_fn(calls), max_workers=3)
+        assert calls == ["material 1"]
+        assert [s.line_total for s in result.selections] == [1_100, 3_300]
