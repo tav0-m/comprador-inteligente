@@ -63,6 +63,28 @@ export interface PriceIndexResponse {
   series: PriceIndexPoint[]
 }
 
+export interface PriceOpportunity {
+  title: string
+  store: string | null
+  seller: string | null
+  link: string | null
+  current_price: number
+  median_price: number
+  min_price_window: number
+  drop_pct: number
+  is_window_low: boolean
+  days_observed: number
+  observed_on: string
+}
+
+export interface OpportunitiesResponse {
+  query: string | null
+  min_drop_pct: number
+  days: number
+  count: number
+  opportunities: PriceOpportunity[]
+}
+
 export interface PriceHistoryPoint {
   date: string
   store: string

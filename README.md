@@ -84,6 +84,7 @@ Genera claves con `python -c "import secrets; print(secrets.token_urlsafe(48))"`
 | `POST /basket/import?filename=` | público | Lista de materiales `.xlsx`/`.csv` (cuerpo binario) → líneas + advertencias |
 | `POST /basket/export` | público | Orden de compra por proveedor en CSV para Excel |
 | `GET /catalog/price-index?q=&days=` | público | Serie diaria de precios comparables |
+| `GET /catalog/opportunities?q=&min_drop=` | público | Productos con precio de hoy bajo su mediana histórica |
 | `POST /alerts` | público | Alerta de precio (se activa al confirmar el email) |
 | `POST /feedback` | público | Voto útil/no útil (uno por cliente y oferta) |
 | `GET /catalog/status` | admin | Salud del catálogo y tasa de éxito por tienda |

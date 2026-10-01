@@ -2,13 +2,14 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { BarChart2, Bell, ClipboardList, HardHat, Search, TrendingUp, Zap } from 'lucide-react'
+import { BarChart2, Bell, ClipboardList, HardHat, Search, TrendingDown, TrendingUp, Zap } from 'lucide-react'
 import { clsx } from 'clsx'
 
 const links = [
   { href: '/', label: 'Buscar', icon: Search },
   { href: '/procurement', label: 'Cotizar obra', icon: ClipboardList },
   { href: '/history', label: 'Historial', icon: TrendingUp },
+  { href: '/opportunities', label: 'Oportunidades', icon: TrendingDown },
   { href: '/alerts', label: 'Alertas', icon: Bell },
   { href: '/stats', label: 'Métricas', icon: BarChart2 },
   { href: '/live', label: 'En vivo', icon: Zap },

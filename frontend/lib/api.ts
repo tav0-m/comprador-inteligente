@@ -2,6 +2,7 @@ import type {
   BasketLine,
   BasketOptimizationResponse,
   BomImportResponse,
+  OpportunitiesResponse,
   StoreTerms,
   PriceHistoryPoint,
   PriceIndexResponse,
@@ -49,6 +50,9 @@ export const getPriceHistory = (query: string, limit = 500) =>
 
 export const getPriceIndex = (query: string, days = 30) =>
   request<PriceIndexResponse>(urlFor('/catalog/price-index', { q: query, days }))
+
+export const getOpportunities = (params: { q?: string; min_drop?: number; days?: number }) =>
+  request<OpportunitiesResponse>(urlFor('/catalog/opportunities', params))
 
 export const getStats = () => request<StatsResponse>(urlFor('/stats'))
 
