@@ -29,3 +29,5 @@ frontend/.env.local
 *.db.bak
 .claude/
 ci_*.db
+frontend/tsconfig.tsbuildinfo
+frontend/next-env.d.ts
