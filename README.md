@@ -69,6 +69,19 @@ celery -A app.worker worker --queues=searches,maintenance,ml
 celery -A app.worker beat
 ```
 
+Ingesta diaria sin Redis ni Celery (un solo equipo; suficiente para acumular la serie de precios):
+
+```bash
+python -m app.ingest                       # todas las consultas vigiladas activas
+python -m app.ingest --limit 10            # solo las 10 menos recientes
+python -m app.ingest --query "cemento 25 kg"
+```
+
+En Windows, `powershell -ExecutionPolicy Bypass -File scripts\programar_ingesta.ps1 -Hora 12:00`
+registra una tarea diaria (corre al encender el equipo si estaba apagado a esa hora) que
+escribe en `data\logs\ingesta.log`. Un candado (`data/ingest.lock`) evita corridas simultáneas.
+No la combines con `celery beat` sobre la misma base: ambas harían la misma ingesta.
+
 Todo junto con Docker: `docker compose up --build` (define `POSTGRES_PASSWORD`,
 `ADMIN_API_KEY` y `APP_SECRET_KEY` en `.env`).
 
